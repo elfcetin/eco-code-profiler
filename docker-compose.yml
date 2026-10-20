@@ -1,0 +1,92 @@
+# Eco-Code Profiler — PostgreSQL + Ollama + backend (frontend dahil)
+#
+#   docker compose up -d --build
+#   Arayüz: http://localhost:8000   API belgeleri: http://localhost:8000/docs
+#
+# İlk çalıştırmada "ollama-pull" servisi modeli indirir (internet gerekir).
+# Kapalı ağda model dosyalarının nasıl taşınacağı için README.md'ye bakın.
+
+name: eco-profiler
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eco}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eco}
+      POSTGRES_DB: ${POSTGRES_DB:-eco_profiler}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # NVIDIA GPU varsa (nvidia-container-toolkit kurulu olmalı) yorumu kaldırın:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  # Modeli bir kez indirip çıkar. Model zaten varsa hızlıca biter.
+  ollama-pull:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "${OLLAMA_MODEL:-qwen2.5-coder:7b}"]
+    restart: "no"
+
+  backend:
+    image: eco-profiler-backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-eco}:${POSTGRES_PASSWORD:-eco}@postgres:5432/${POSTGRES_DB:-eco_profiler}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5-coder:7b}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
+    ports:
+      - "8000:8000"
+    # Kullanıcı kodu bu container içinde (alt süreçte) çalıştırıldığı için sıkılaştırma:
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+
+volumes:
+  pgdata:
+  ollama:

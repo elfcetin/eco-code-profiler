@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Ortam / gizli bilgiler
+.env
+.env.*
+!.env.example
+
+# Yerel veritabanı
+*.db
+*.sqlite3
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# Editör / OS
+.vscode/
+.idea/
+.DS_Store
+*.log
