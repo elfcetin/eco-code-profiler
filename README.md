@@ -1,5 +1,7 @@
 # Eco-Code Profiler
 
+🎥 **Ekran kaydı:** <https://drive.google.com/file/d/1zd_66iX9i9wUBRGcivbW5X4tUC-2_Nck/view?usp=sharing>
+
 Kapalı ağda (air-gapped) çalışan kurumlar için **algoritmik enerji israfı** analiz paneli.
 
 Geliştirici Python kodunu yapıştırır. Sistem:
