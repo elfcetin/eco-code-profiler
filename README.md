@@ -6,7 +6,7 @@ Geliştirici Python kodunu yapıştırır. Sistem:
 
 1. Kodu **AST ile statik olarak analiz eder** ve gereksiz iş yapan yapıları tespit eder (ör. O(N²) iç içe döngüler, döngüde listede arama, önbelleksiz özyineleme).
 2. Tespit edilen desenlere karşılık gelen **onaylı "Yeşil Kod Desenleri"ni** veritabanından getirir.
-3. **Yerel bir LLM** (Ollama) ile kodu yalnızca bu desenlere göre, fonksiyon adlarını ve imzalarını değiştirmeden yeniden yazar.
+3. Kodu **yerel bir LLM**'e (Ollama) yeniden yazdırır. Modele yalnızca bu desenlerin çözüm ve örnekleri verilir ve yalnızca bunları kullanması istenir. Fonksiyon adlarının ve imzalarının değişmediği yanıt gelince denetlenir.
 4. Eski ve yeni kodu **yalıtılmış bir alt süreçte çalıştırır**, aynı girdilerde aynı sonucu verdiklerini doğrular ve **çalışma sürelerini ölçer**.
 
 Doğrulamadan geçemeyen kod "optimize edildi" olarak sunulmaz. Doğrulama başarısız olursa hata ayrıntısı (en küçük karşı örnek dahil) LLM'e geri bildirim olarak verilip bir kez daha denenir. Ayrıntılar için [Doğrulama nasıl çalışır](#doğrulama-nasıl-çalışır) bölümüne bakın.
@@ -345,7 +345,7 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
   - `minimal`: uyuşmazlığın en küçük karşı örneği `{input, old, new}`.
 - `benchmark.functions[].auto=true` ise ölçüm girdisi otomatik üretilmiştir.
 - Bulgu yoksa LLM **hiç çağrılmaz** ve `status="clean"`, `message="Algoritmik enerji israfı tespit edilmedi"` döner.
-- `status="failed"` durumunda, varsa son üretilen kod ve doğrulama ayrıntısı yine yanıtta yer alır. Arayüz bu kodu "doğrulanmadı" olarak gösterir.
+- `status="failed"` durumunda, varsa son üretilen kod ve doğrulama ayrıntısı yine yanıtta yer alır. Arayüz üstte kırmızı "Doğrulanmış optimizasyon üretilemedi" kartını ve hata ayrıntısını gösterir; son üretilen kod incelenebilmesi için kod karşılaştırmasında yine görünür (kopyalanabilir). Bu kod kullanılmamalıdır.
 - Sözdizimi hatalı kodda LLM çağrılmaz ve `status="failed"` döner. Hata, `error` alanında satır numarasıyla belirtilir.
 
 ---
