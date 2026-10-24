@@ -52,6 +52,8 @@ Kurallar:
   Örnekler: f(items) için "[[random.randint(0, 1000) for _ in range(5000)]]",
             g(numbers, target) için "[[random.randint(0, 10000) for _ in range(5000)], -1]".
   Orijinal sürümü üstel (O(2^N)) olan fonksiyonlarda N'yi küçük tut (ör. 25).
+  Fonksiyon bir şey arıyor ve bulunca erken dönüyorsa (return), benchmark girdisini eşleşmenin HİÇ
+  bulunmadığı veya en sonda bulunduğu şekilde üret (ör. two-sum için ulaşılamayan bir hedef değer).
 - Bir deseni güvenle uygulayamıyorsan o kısmı değiştirme ve nedenini notes alanında açıkla.
 """
 

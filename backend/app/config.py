@@ -24,4 +24,11 @@ GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 # Tek bir LLM isteği için zaman aşımı (saniye); CPU üzerinde yerel modeller yavaş olabilir.
 LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "300"))
 
+# Tahmini enerji hesabı varsayımları (ölçüm DEĞİL; bkz. energy.py).
+# İşlemcinin çalışırken çektiği güç (W) ve optimize edilen fonksiyonun günde kaç kez çalıştığı.
+CPU_POWER_WATTS: float = float(os.getenv("CPU_POWER_WATTS", "65"))
+RUNS_PER_DAY: float = float(os.getenv("RUNS_PER_DAY", "10000"))
+if CPU_POWER_WATTS <= 0 or RUNS_PER_DAY <= 0:
+    raise ValueError("CPU_POWER_WATTS ve RUNS_PER_DAY pozitif olmalı")
+
 IS_SQLITE: bool = DATABASE_URL.startswith("sqlite")

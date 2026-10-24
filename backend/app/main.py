@@ -8,25 +8,27 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from . import config, db, llm, rag
+from . import config, db, energy, llm, rag, report
 from .analyzer import analyze
+from .patterns import IMPACT_HIGH, IMPACT_LOW, IMPACT_MEDIUM
 from .verifier import verify
 
 MAX_ATTEMPTS = 2  # ilk deneme + doğrulama başarısızsa 1 tekrar
 CLEAN_MESSAGE = "Algoritmik enerji israfı tespit edilmedi"
 FRONTEND_DIST = config.BASE_DIR.parent / "frontend" / "dist"
+IMPACTS = (IMPACT_HIGH, IMPACT_MEDIUM, IMPACT_LOW)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db.init_db()  # tablolar yoksa oluştur, desenler boşsa doldur
+    db.init_db()  # eksik tablo/sütunları oluştur, tabloda olmayan başlangıç desenlerini ekle (mevcutlara dokunmaz)
     yield
 
 
@@ -56,10 +58,32 @@ class OptimizeResponse(BaseModel):
     green_code: str | None = None
     changes: list[dict[str, Any]] = []
     verification: dict[str, Any] | None = None
+    # Ölçülen süre farkından varsayımlara dayalı TAHMİN (ölçüm değil); yalnızca doğrulanmış ve
+    # daha hızlı sonuçlarda dolu.
+    energy: dict[str, Any] | None = None
     notes: str = ""
     warnings: list[str] = []
     attempts: int = 0
     error: str | None = None
+
+
+class PatternUpdate(BaseModel):
+    anti_pattern: str = Field(max_length=5_000, description="Sorunun açıklaması")
+    solution: str = Field(max_length=5_000)
+    impact: str
+    example_before: str = Field(max_length=10_000)
+    example_after: str = Field(max_length=10_000)
+
+
+class EnergyRequest(BaseModel):
+    old_seconds: float | None
+    new_seconds: float | None
+    watts: float = Field(gt=0, le=100_000, description="İşlemci gücü varsayımı (W)")
+    runs_per_day: float = Field(gt=0, le=1e12, description="Fonksiyonun günde kaç kez çalıştığı varsayımı")
+
+
+class PatternActive(BaseModel):
+    is_active: bool
 
 
 class HistoryItem(BaseModel):
@@ -131,6 +155,31 @@ def _verification_feedback(verification: dict) -> str:
     return "\n".join(lines)
 
 
+def _get_pattern(session: Session, code: str) -> db.GreenPattern:
+    pattern = session.get(db.GreenPattern, code)
+    if pattern is None:
+        raise HTTPException(status_code=404, detail=f"{code} kodlu desen bulunamadı.")
+    return pattern
+
+
+def _validate_pattern_update(req: PatternUpdate) -> None:
+    """Geçersiz düzenlemede 400 döndürür (LLM'e bozuk desen gönderilmesin)."""
+    if req.impact not in IMPACTS:
+        raise HTTPException(status_code=400, detail=f"Geçersiz etki düzeyi: {req.impact!r} ({' | '.join(IMPACTS)} olmalı).")
+    labels = {"anti_pattern": "Sorun açıklaması", "solution": "Çözüm",
+              "example_before": "Önce örneği", "example_after": "Sonra örneği"}
+    for field, label in labels.items():
+        if not getattr(req, field).strip():
+            raise HTTPException(status_code=400, detail=f"{label} boş olamaz.")
+    for field in ("example_before", "example_after"):
+        try:
+            ast.parse(getattr(req, field))
+        except SyntaxError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"{labels[field]} geçerli Python değil (satır {exc.lineno}): {exc.msg}"
+            ) from exc
+
+
 def _save_run(session: Session, code: str, response: OptimizeResponse) -> OptimizeResponse:
     bench = (response.verification or {}).get("benchmark") or {}
     run = db.AnalysisRun(
@@ -170,18 +219,40 @@ def health(session: Session = Depends(db.get_session)) -> dict:
 @app.get("/api/patterns")
 def patterns(session: Session = Depends(db.get_session)) -> list[dict]:
     rows = session.scalars(select(db.GreenPattern).order_by(db.GreenPattern.code)).all()
-    return [row.to_dict() for row in rows]
+    return [row.to_api_dict() for row in rows]
+
+
+@app.put("/api/patterns/{code}")
+def update_pattern(code: str, req: PatternUpdate, session: Session = Depends(db.get_session)) -> dict:
+    pattern = _get_pattern(session, code)
+    _validate_pattern_update(req)
+    pattern.anti_pattern = req.anti_pattern.strip()
+    pattern.solution = req.solution.strip()
+    pattern.impact = req.impact
+    pattern.example_before = req.example_before
+    pattern.example_after = req.example_after
+    session.commit()
+    return pattern.to_api_dict()
+
+
+@app.patch("/api/patterns/{code}/active")
+def set_pattern_active(code: str, req: PatternActive, session: Session = Depends(db.get_session)) -> dict:
+    pattern = _get_pattern(session, code)
+    pattern.is_active = req.is_active
+    session.commit()
+    return pattern.to_api_dict()
 
 
 @app.post("/api/analyze")
-def analyze_code(req: CodeRequest) -> dict:
-    return analyze(req.code)
+def analyze_code(req: CodeRequest, session: Session = Depends(db.get_session)) -> dict:
+    return analyze(req.code, db.load_catalog(session))
 
 
 @app.post("/api/optimize", response_model=OptimizeResponse)
 def optimize_code(req: CodeRequest, session: Session = Depends(db.get_session)) -> OptimizeResponse:
     code = req.code
-    analysis = analyze(code)
+    catalog = db.load_catalog(session)
+    analysis = analyze(code, catalog)
 
     if analysis["syntax_error"]:
         err = analysis["syntax_error"]
@@ -226,6 +297,7 @@ def optimize_code(req: CodeRequest, session: Session = Depends(db.get_session)) 
 
     passed = bool(verification and verification["passed"])
     green_code = result["green_code"] if result else None
+    bench = (verification or {}).get("benchmark") or {}
     response = OptimizeResponse(
         status="optimized" if passed else "failed",
         message=(
@@ -234,16 +306,28 @@ def optimize_code(req: CodeRequest, session: Session = Depends(db.get_session)) 
             else "Doğrulanmış bir optimizasyon üretilemedi; orijinal kodu kullanmaya devam edin."
         ),
         analysis=analysis,
-        analysis_after=analyze(green_code) if green_code else None,
+        analysis_after=analyze(green_code, catalog) if green_code else None,
         green_code=green_code,
         changes=result["changes"] if result else [],
         verification=verification,
+        energy=energy.estimate(bench.get("old_seconds"), bench.get("new_seconds")) if passed else None,
         notes=result["notes"] if result else "",
         warnings=result["warnings"] if result else [],
         attempts=attempts,
         error=error,
     )
     return _save_run(session, code, response)
+
+
+@app.post("/api/energy/estimate")
+def energy_estimate(req: EnergyRequest) -> dict:
+    """Arayüzde varsayımlar değiştirildiğinde tahmini yeniden hesaplar (formül tek yerde: energy.py)."""
+    return {"estimate": energy.estimate(req.old_seconds, req.new_seconds, req.watts, req.runs_per_day)}
+
+
+@app.get("/api/report")
+def get_report(session: Session = Depends(db.get_session)) -> dict:
+    return report.build_report(session)
 
 
 @app.get("/api/history", response_model=list[HistoryItem])

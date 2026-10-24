@@ -10,6 +10,7 @@ Kullanıcı kodu ASLA bu süreçte çalıştırılmaz. Her doğrulama:
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import signal
@@ -29,6 +30,7 @@ import json
 import os
 import random
 import sys
+import time
 import timeit
 import types
 
@@ -313,13 +315,81 @@ save()
 
 # --- 3) performans ölçümü ----------------------------------------------------
 # LLM benchmark ifadesi vermediyse örnek girdiden 2000 elemanlı otomatik girdi üret.
+# Döngü içinde erken dönen (arama) fonksiyonlarda girdi EN KÖTÜ DURUMU zorlamalı: eşleşme
+# bulunup erken dönülürse ölçüm gerçek farkı gizler (ör. two-sum'da çift hemen bulunur).
+AUTO_SIZE = 2000
+PROBE_BUDGET = 10.0  # en kötü durum aramasına ayrılan toplam süre (sn)
+EARLY = {name: set(lines) for name, lines in P.get("early_returns", {}).items()}
+BIG = 10 ** 9 + 7
+
+
+def code_of(fn):
+    return getattr(fn, "__code__", None) or getattr(getattr(fn, "__func__", None), "__code__", None)
+
+
+def returns_early(fn, args, lines):
+    """Fonksiyon bu girdide döngü içindeki bir return satırından mı döndü? (sys.setprofile ile)"""
+    code = code_of(fn)
+    if code is None:
+        return False
+    returned_at = []
+
+    def profile(frame, event, arg):
+        if event == "return" and frame.f_code is code:
+            returned_at.append(frame.f_lineno)
+
+    sys.setprofile(profile)
+    try:
+        call(fn, copy.deepcopy(args))
+    finally:
+        sys.setprofile(None)
+    return bool(returned_at) and returned_at[-1] in lines  # en dıştaki çağrı en son döner
+
+
+def distinct_args(args, rng, size):
+    """Tamsayı listelerini TEKRARSIZ rastgele listelerle değiştirir (eşleşen eleman çifti olmaz)."""
+    out, changed = [], False
+    for a in args:
+        if isinstance(a, list) and a and all(type(x) is int for x in a):
+            lo, hi = min(a), max(a)
+            span = max(hi - lo, 4 * size)
+            out.append(rng.sample(range(lo - span, hi + span), size))
+            changed = True
+        else:
+            out.append(a)
+    return out if changed else None
+
+
+def with_scalars(args, value):
+    """Liste dışı tamsayı argümanları (ör. hedef değer) ulaşılamaz bir değerle değiştirir."""
+    if not any(type(a) is int for a in args):
+        return None
+    return [value if type(a) is int else a for a in args]
+
+
+def worst_case_input(fn, base, lines):
+    """Erken dönüşe yol açmayan (eşleşmesiz) bir girdi arar; bulamazsa None."""
+    started = time.perf_counter()
+    for k, make in enumerate((fuzz_args, distinct_args)):
+        lists = make(base, random.Random(12345 + k), AUTO_SIZE) or list(base)
+        for scalar in (None, BIG, -BIG):
+            candidate = lists if scalar is None else with_scalars(lists, scalar)
+            if candidate is None or not binds(fn, candidate):
+                continue
+            if not returns_early(fn, candidate, lines):
+                return candidate
+            if time.perf_counter() - started > PROBE_BUDGET:
+                return None
+    return None
+
+
 benchmarks = dict(P["benchmark_input"])
 for name in BASES:
     benchmarks.setdefault(name, None)
 
 for name, expr in benchmarks.items():
     entry = {"function": name, "old_seconds": None, "new_seconds": None, "outputs_equal": None,
-             "error": None, "auto": expr is None}
+             "error": None, "auto": expr is None, "worst_case": None, "note": None}
     RESULT["benchmark"].append(entry)
     old_fn, new_fn = get_fn(old_mod, name), get_fn(new_mod, name)
     if old_fn is None or new_fn is None:
@@ -328,7 +398,7 @@ for name, expr in benchmarks.items():
         continue
     try:
         if expr is None:
-            args = fuzz_args(BASES[name], random.Random(12345), 2000)
+            args = fuzz_args(BASES[name], random.Random(12345), AUTO_SIZE)
             if args is None:
                 RESULT["benchmark"].pop()
                 continue
@@ -341,6 +411,17 @@ for name, expr in benchmarks.items():
         entry["error"] = f"Benchmark girdisi üretilemedi: {type(exc).__name__}: {exc}"
         save()
         continue
+    if name in EARLY and binds(old_fn, args):
+        early = returns_early(old_fn, args, EARLY[name])
+        if early and name in BASES:
+            worst = worst_case_input(old_fn, BASES[name], EARLY[name])
+            if worst is not None:
+                args, early = worst, False
+                if expr is not None:
+                    entry["note"] = ("LLM'in ölçüm girdisinde fonksiyon erken döndüğü için sistemin "
+                                     "eşleşmesiz (en kötü durum) girdisi kullanıldı.")
+                entry["auto"] = True
+        entry["worst_case"] = not early
     if not binds(old_fn, args):
         entry["error"] = "Benchmark girdisi fonksiyon imzasına uymuyor."
         save()
@@ -418,6 +499,42 @@ def _run_child(workdir: Path, payload: dict, timeout: float) -> tuple[dict | Non
     return result, timed_out, (stderr or b"").decode("utf-8", "replace")[-2000:]
 
 
+def early_return_lines(source: str) -> dict[str, list[int]]:
+    """Döngü içinde `return` olan fonksiyonlar -> o return satırları (iç fonksiyonlar hariç).
+
+    Bu fonksiyonlar bir şey arayıp bulunca erken döner; ölçüm girdisi en kötü durumu
+    (eşleşme yok) zorlamalıdır.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    functions = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.append((node.name, node))
+        elif isinstance(node, ast.ClassDef):
+            functions += [(f"{node.name}.{item.name}", item) for item in node.body
+                          if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    loops = (ast.For, ast.AsyncFor, ast.While)
+    scopes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+    result = {}
+    for name, fn in functions:
+        lines = set()
+        stack = [(child, False) for child in ast.iter_child_nodes(fn)]
+        while stack:
+            node, in_loop = stack.pop()
+            if isinstance(node, scopes):
+                continue
+            if isinstance(node, ast.Return) and in_loop:
+                lines.add(node.lineno)
+            inner = in_loop or isinstance(node, loops)
+            stack.extend((child, inner) for child in ast.iter_child_nodes(node))
+        if lines:
+            result[name] = sorted(lines)
+    return result
+
+
 def _summarize_benchmark(entries: list[dict]) -> dict | None:
     if not entries:
         return None
@@ -452,16 +569,22 @@ def verify(
                      ["minimal": {"input", "old", "new"}]}, ...],
           "benchmark": None | {"old_seconds", "new_seconds", "speedup",
                                "functions": [{"function", "old_seconds", "new_seconds",
-                                              "outputs_equal", "error"}, ...]},
+                                              "outputs_equal", "error", "auto",
+                                              "worst_case", "note"}, ...]},
           "timed_out": bool,
           "error": None | str,
         }
+
+    worst_case: döngü içinde erken dönen fonksiyonlarda ölçüm girdisinin erken dönüşe yol
+    açmadığı (True) / açtığı (False) doğrulandı; diğer fonksiyonlarda None. LLM'in girdisi
+    erken dönüşe yol açıyorsa sistemin eşleşmesiz girdisi kullanılır (auto=True, note dolu).
     """
     payload = {
         "original_code": original_code,
         "green_code": green_code,
         "test_inputs": test_inputs or {},
         "benchmark_input": benchmark_input or {},
+        "early_returns": early_return_lines(original_code),
         "timeout": timeout,
         "memory_mb": memory_mb,
     }

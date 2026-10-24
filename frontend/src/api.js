@@ -19,12 +19,19 @@ async function request(path, options = {}) {
   return body
 }
 
-const post = (path, data) => request(path, { method: 'POST', body: JSON.stringify(data) })
+const send = (method) => (path, data) => request(path, { method, body: JSON.stringify(data) })
+const post = send('POST')
+const put = send('PUT')
+const patch = send('PATCH')
 
 export const api = {
   health: () => request('/api/health'),
   patterns: () => request('/api/patterns'),
+  updatePattern: (code, data) => put(`/api/patterns/${encodeURIComponent(code)}`, data),
+  setPatternActive: (code, isActive) => patch(`/api/patterns/${encodeURIComponent(code)}/active`, { is_active: isActive }),
   history: () => request('/api/history'),
+  report: () => request('/api/report'),
+  energyEstimate: (data) => post('/api/energy/estimate', data),
   analyze: (code) => post('/api/analyze', { code }),
   optimize: (code) => post('/api/optimize', { code }),
 }

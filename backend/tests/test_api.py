@@ -103,6 +103,88 @@ def test_patterns(client):
     assert len(body) == 10
 
 
+def test_patterns_include_management_fields(client):
+    first = client.get("/api/patterns").json()[0]
+    assert first["is_active"] is True
+    assert first["updated_at"]
+
+
+def pattern_payload(**overrides) -> dict:
+    payload = {
+        "anti_pattern": "Kuruma özel açıklama.",
+        "solution": "Kuruma özel çözüm.",
+        "impact": "orta",
+        "example_before": "for x in a:\n    for y in b:\n        pass\n",
+        "example_after": "b_set = set(b)\n",
+    }
+    return {**payload, **overrides}
+
+
+def test_update_pattern(client):
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(solution="  Kuruma özel çözüm.  "))
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["solution"] == "Kuruma özel çözüm."
+    assert body["impact"] == "orta" and body["title"] == "İç içe döngü"
+
+    saved = next(p for p in client.get("/api/patterns").json() if p["code"] == "YK-01")
+    assert saved == body
+    # Analiz yeni etki düzeyini kullanır.
+    findings = client.post("/api/analyze", json={"code": FIND_DUPLICATES}).json()["findings"]
+    assert next(f for f in findings if f["pattern_code"] == "YK-01")["impact"] == "orta"
+
+
+@pytest.mark.parametrize("overrides, message", [
+    ({"impact": "çok yüksek"}, "Geçersiz etki"),
+    ({"solution": "   "}, "Çözüm boş"),
+    ({"anti_pattern": ""}, "Sorun açıklaması boş"),
+    ({"example_after": "def f(:\n"}, "geçerli Python değil"),
+])
+def test_update_pattern_rejects_invalid_input(client, overrides, message):
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(**overrides))
+    assert resp.status_code == 400
+    assert message in resp.json()["detail"]
+    original = next(p for p in client.get("/api/patterns").json() if p["code"] == "YK-01")
+    assert original["impact"] == "yüksek"  # hiçbir şey kaydedilmedi
+
+
+def test_update_unknown_pattern_is_404(client):
+    assert client.put("/api/patterns/YK-99", json=pattern_payload()).status_code == 404
+    assert client.patch("/api/patterns/YK-99/active", json={"is_active": False}).status_code == 404
+
+
+def test_toggle_pattern_active(client):
+    body = client.patch("/api/patterns/YK-02/active", json={"is_active": False}).json()
+    assert body["is_active"] is False
+    findings = client.post("/api/analyze", json={"code": FIND_DUPLICATES}).json()["findings"]
+    assert "YK-02" not in {f["pattern_code"] for f in findings}
+
+    client.patch("/api/patterns/YK-02/active", json={"is_active": True})
+    findings = client.post("/api/analyze", json={"code": FIND_DUPLICATES}).json()["findings"]
+    assert "YK-02" in {f["pattern_code"] for f in findings}
+
+
+def test_inactive_patterns_are_not_sent_to_llm(client, monkeypatch):
+    client.patch("/api/patterns/YK-02/active", json={"is_active": False})
+    fake = use_llm(monkeypatch, llm_result(GREEN_DUPLICATES))
+    body = client.post("/api/optimize", json={"code": FIND_DUPLICATES}).json()
+
+    reported = {f["pattern_code"] for f in body["analysis"]["findings"]}
+    assert "YK-02" not in reported and "YK-01" in reported
+    assert {f["pattern_code"] for f in fake.calls[0]["findings"]} == reported
+    assert {p["code"] for p in fake.calls[0]["patterns"]} == reported
+
+
+def test_all_detected_patterns_inactive_means_clean(client, monkeypatch):
+    detected = {f["pattern_code"] for f in client.post("/api/analyze", json={"code": FIND_DUPLICATES}).json()["findings"]}
+    for code in detected:
+        client.patch(f"/api/patterns/{code}/active", json={"is_active": False})
+    fake = use_llm(monkeypatch)
+    body = client.post("/api/optimize", json={"code": FIND_DUPLICATES}).json()
+    assert body["status"] == "clean"
+    assert fake.calls == []
+
+
 def test_analyze_endpoint(client):
     body = client.post("/api/analyze", json={"code": FIND_DUPLICATES}).json()
     assert {"YK-01", "YK-02"} <= {f["pattern_code"] for f in body["findings"]}
@@ -143,6 +225,11 @@ def test_find_duplicates_is_optimized_and_verified(client, monkeypatch):
     assert {"YK-01", "YK-02"} <= before
     assert not after & {"YK-01", "YK-02"}
 
+    # Tahmini enerji: doğrulanmış ve hızlanmış sonuçta, ölçülen sürelerden.
+    bench = body["verification"]["benchmark"]
+    assert body["energy"]["kwh_per_year"] > 0
+    assert body["energy"]["joules_per_run"] == pytest.approx((bench["old_seconds"] - bench["new_seconds"]) * 65)
+
     # LLM'e yalnızca tespit edilen desenler verildi.
     assert {p["code"] for p in fake.calls[0]["patterns"]} == before
 
@@ -164,6 +251,7 @@ def test_two_failed_attempts_give_failed(client, monkeypatch):
     assert body["status"] == "failed"
     assert body["attempts"] == 2 and len(fake.calls) == 2
     assert body["verification"]["passed"] is False
+    assert body["energy"] is None  # doğrulanmamış koda enerji tahmini yok
 
 
 def test_llm_unavailable_gives_failed_without_retry(client, monkeypatch):

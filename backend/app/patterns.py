@@ -1,7 +1,13 @@
 """Onaylı "Yeşil Kod Desenleri" başlangıç verisi.
 
-Veritabanındaki `green_patterns` tablosu boşken bu liste ile doldurulur.
-Başlık ve etki değerleri analyzer tarafından da buradan okunur.
+Asıl kaynak veritabanındaki `green_patterns` tablosudur. Bu liste yalnızca başlangıç
+verisidir: backend her açıldığında tabloda OLMAYAN desenler buradan eklenir, mevcut
+kayıtların (arayüzden yapılan düzenlemeler dahil) üzerine yazılmaz. Buradaki bir
+değişiklik mevcut kurulumlara yansımaz; desenler "Yeşil Kod Desenleri" ekranından
+veya /api/patterns uç noktalarından düzenlenir.
+
+Analizci başlık ve etki bilgisini veritabanından alır; bu liste yalnızca katalog
+verilmeden çağrıldığında (ör. birim testleri) varsayılan olarak kullanılır.
 """
 
 IMPACT_HIGH = "yüksek"

@@ -3,14 +3,16 @@ import { api } from './api.js'
 import { IMPACT_CLASS, IMPACT_RANK } from './format.js'
 import { SAMPLES } from './samples.js'
 import CodeEditor from './components/CodeEditor.jsx'
-import ResultView from './components/ResultView.jsx'
+import ResultView, { analysisOf } from './components/ResultView.jsx'
 import PatternsTab from './components/PatternsTab.jsx'
 import HistoryTab from './components/HistoryTab.jsx'
+import ReportTab from './components/ReportTab.jsx'
 
 const TABS = [
   ['analysis', 'Analiz'],
   ['patterns', 'Yeşil Kod Desenleri'],
   ['history', 'Geçmiş'],
+  ['report', 'Rapor'],
 ]
 
 function useHealth() {
@@ -75,7 +77,7 @@ export default function App() {
   // Vurgular yalnızca sonuç, editördeki kodun kendisine aitse gösterilir.
   const highlights = useMemo(() => {
     if (!result || result.code !== code) return new Map()
-    const analysis = result.kind === 'analyze' ? result.data : result.data.analysis
+    const analysis = analysisOf(result)
     const worst = new Map() // satır -> en yüksek etki
     for (const f of analysis?.findings ?? []) {
       if (!worst.has(f.line) || IMPACT_RANK[f.impact] > IMPACT_RANK[worst.get(f.line)]) worst.set(f.line, f.impact)
@@ -102,6 +104,14 @@ export default function App() {
     setCode(newCode)
     setResult(null)
     setError(null)
+  }
+
+  // Geçmiş/rapor kaydını editöre yükler; optimize edilmiş/başarısız kayıtlar sonucuyla açılır
+  // (aynı gösterim kuralları: başarısız kod önerilmez ve kopyalanamaz).
+  function openRun(run) {
+    loadCode(run.original_code)
+    if (run.status !== 'clean') setResult({ kind: 'history', code: run.original_code, data: run })
+    setTab('analysis')
   }
 
   const busy = loading !== null
@@ -185,14 +195,8 @@ export default function App() {
           </>
         )}
         {tab === 'patterns' && <PatternsTab />}
-        {tab === 'history' && (
-          <HistoryTab
-            onLoadCode={(c) => {
-              loadCode(c)
-              setTab('analysis')
-            }}
-          />
-        )}
+        {tab === 'history' && <HistoryTab onLoadRun={openRun} />}
+        {tab === 'report' && <ReportTab onLoadRun={openRun} />}
       </main>
     </div>
   )

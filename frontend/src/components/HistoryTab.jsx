@@ -4,7 +4,7 @@ import { formatDate, formatSeconds, formatSpeedup } from '../format.js'
 
 const STATUS_LABEL = { clean: 'Temiz', optimized: 'Optimize edildi', failed: 'Başarısız' }
 
-export default function HistoryTab({ onLoadCode }) {
+export default function HistoryTab({ onLoadRun }) {
   const [items, setItems] = useState(null)
   const [error, setError] = useState(null)
 
@@ -52,7 +52,7 @@ export default function HistoryTab({ onLoadCode }) {
                     <td className="num">{formatSeconds(run.new_seconds)}</td>
                     <td className="num strong">{formatSpeedup(run.speedup)}</td>
                     <td className="right">
-                      <button type="button" className="btn btn-link" onClick={() => onLoadCode(run.original_code)}>
+                      <button type="button" className="btn btn-link" onClick={() => onLoadRun(run)}>
                         Editöre yükle
                       </button>
                     </td>

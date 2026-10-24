@@ -814,6 +814,168 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+/* Tahmini enerji (ölçüm değil: kesik çizgi + "Tahmin" etiketi ile ayrılır) */
+.energy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.card.energy {
+  padding: 16px;
+  border-radius: var(--radius);
+  box-shadow: none;
+}
+
+.energy-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.energy-header h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.estimate-badge {
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px dashed var(--muted);
+}
+
+.energy-value {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.energy-number {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.energy-inputs {
+  display: flex;
+  gap: 8px 20px;
+  flex-wrap: wrap;
+}
+
+.energy-inputs input {
+  width: 110px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.energy-inputs input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+/* Rapor */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.stat-tile {
+  gap: 4px;
+}
+
+.stat-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.stat-value {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-sub {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.stat-sub .nowrap,
+.stat-items .nowrap {
+  white-space: nowrap;
+}
+
+.stat-items {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.5;
+  padding: 6px 0 2px;
+}
+
+.pattern-bars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.pattern-bar-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 300px) 1fr 64px;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.pattern-bar-row:hover {
+  background: var(--surface-2);
+}
+
+.pattern-bar-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pattern-bar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pattern-bar-row .bar-track {
+  display: block;
+  height: 12px;
+  background: transparent;
+}
+
+.pattern-bar-row .bar {
+  display: block;
+  min-width: 2px;
+  border-radius: 0 4px 4px 0;
+}
+
 /* Diff */
 .diff {
   display: grid;
@@ -1018,6 +1180,149 @@ button {
   border-left-color: var(--accent);
 }
 
+.note {
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  font-weight: 500;
+}
+
+.pattern-card.inactive > :not(.pattern-header) {
+  opacity: 0.5;
+}
+
+.pattern-card.inactive .pattern-header > :not(.switch):not(.btn) {
+  opacity: 0.5;
+}
+
+.btn-small {
+  padding: 4px 12px;
+  font-size: 13px;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  user-select: none;
+}
+
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.switch-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.15s;
+}
+
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transition: transform 0.15s;
+}
+
+.switch input:checked + .switch-track {
+  background: var(--accent);
+}
+
+.switch input:checked + .switch-track::after {
+  transform: translateX(14px);
+}
+
+.switch input:focus-visible + .switch-track {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.switch input:disabled + .switch-track {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.switch-label {
+  min-width: 3.2em;
+}
+
+.pattern-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.field-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.field textarea,
+.field select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.field-inline select {
+  width: auto;
+}
+
+.field textarea:focus,
+.field select:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.field .code-input {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.diff-pane-title .badge {
+  margin-left: 8px;
+}
+
 /* ------------------------------------------------------------------ */
 /* Dar ekranlar                                                        */
 /* ------------------------------------------------------------------ */
@@ -1038,5 +1343,14 @@ button {
 
   .pattern-text {
     grid-template-columns: 1fr;
+  }
+
+  .pattern-bar-row {
+    grid-template-columns: 1fr 56px;
+  }
+
+  .pattern-bar-row .bar-track {
+    grid-column: 1 / -1;
+    grid-row: 2;
   }
 }

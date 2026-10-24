@@ -3,6 +3,9 @@
 LLM kullanmaz; yalnızca Python'un `ast` modülüyle çalışır. `analyze(code)`
 fonksiyonu sözdizimi hatasını, üst seviye fonksiyonların tahmini zaman
 karmaşıklığını ve "Yeşil Kod" desen ihlallerini (YK-01 … YK-10) döndürür.
+
+Tespit kuralları koddadır; desenlerin başlık, etki ve aktif/pasif bilgisi ise
+`catalog` parametresiyle veritabanından verilir (bkz. db.load_catalog).
 """
 
 from __future__ import annotations
@@ -13,8 +16,11 @@ from typing import Iterable, Iterator
 
 from .patterns import GREEN_PATTERNS
 
-# pattern_code -> (başlık, etki); tek kaynak patterns.py
-PATTERNS: dict[str, tuple[str, str]] = {p["code"]: (p["title"], p["impact"]) for p in GREEN_PATTERNS}
+# pattern_code -> {title, impact, is_active}. Katalog verilmezse (ör. birim testleri) ya da
+# veritabanında bir desen kaydı yoksa patterns.py'deki başlangıç değerleri kullanılır.
+DEFAULT_CATALOG: dict[str, dict] = {
+    p["code"]: {"title": p["title"], "impact": p["impact"], "is_active": True} for p in GREEN_PATTERNS
+}
 
 LOOP_NODES = (ast.For, ast.AsyncFor, ast.While)
 COMP_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -399,7 +405,8 @@ def _collect_functions(tree: ast.Module) -> list[dict]:
 # --------------------------------------------------------------------------- #
 
 class _FindingCollector:
-    def __init__(self) -> None:
+    def __init__(self, catalog: dict[str, dict]) -> None:
+        self.catalog = catalog
         self.findings: list[Finding] = []
         self._seen: set[tuple[int, str, str]] = set()
 
@@ -408,8 +415,10 @@ class _FindingCollector:
         if key in self._seen:
             return
         self._seen.add(key)
-        title, impact = PATTERNS[code]
-        self.findings.append(Finding(line, code, title, detail, impact))
+        info = self.catalog.get(code) or DEFAULT_CATALOG[code]
+        if not info["is_active"]:
+            return  # pasif desenler raporlanmaz
+        self.findings.append(Finding(line, code, info["title"], detail, info["impact"]))
 
     # -- dolaşma ------------------------------------------------------------ #
 
@@ -636,8 +645,11 @@ class _FindingCollector:
 # Genel API
 # --------------------------------------------------------------------------- #
 
-def analyze(code: str) -> dict:
+def analyze(code: str, catalog: dict[str, dict] | None = None) -> dict:
     """Kodu statik olarak analiz eder.
+
+    catalog: kod -> {title, impact, is_active} (db.load_catalog). Pasif desenler
+    bulgulara eklenmez. Verilmezse patterns.py'deki başlangıç değerleri kullanılır.
 
     Dönüş:
         {
@@ -662,7 +674,7 @@ def analyze(code: str) -> dict:
             "findings": [],
         }
 
-    collector = _FindingCollector()
+    collector = _FindingCollector(catalog or DEFAULT_CATALOG)
     module_scope = _build_scope(tree, None)
     for st in tree.body:
         collector.visit(st, module_scope, ())

@@ -11,9 +11,9 @@ Geliştirici Python kodunu yapıştırır. Sistem:
 3. Kodu **yerel bir LLM**'e (Ollama) yeniden yazdırır. Modele yalnızca bu desenlerin çözüm ve örnekleri verilir ve yalnızca bunları kullanması istenir. Fonksiyon adlarının ve imzalarının değişmediği yanıt gelince denetlenir.
 4. Eski ve yeni kodu **yalıtılmış bir alt süreçte çalıştırır**, aynı girdilerde aynı sonucu verdiklerini doğrular ve **çalışma sürelerini ölçer**.
 
-Doğrulamadan geçemeyen kod "optimize edildi" olarak sunulmaz. Doğrulama başarısız olursa hata ayrıntısı (en küçük karşı örnek dahil) LLM'e geri bildirim olarak verilip bir kez daha denenir. Ayrıntılar için [Doğrulama nasıl çalışır](#doğrulama-nasıl-çalışır) bölümüne bakın.
+Doğrulamadan geçemeyen kod "optimize edildi" olarak sunulmaz; arayüzde "Önerilmez" olarak işaretlenir ve kopyalanamaz. Doğrulama başarısız olursa hata ayrıntısı (en küçük karşı örnek dahil) LLM'e geri bildirim olarak verilip bir kez daha denenir. Ayrıntılar için [Doğrulama nasıl çalışır](#doğrulama-nasıl-çalışır) bölümüne bakın.
 
-> Ölçülen değer **çalışma süresidir**, enerji değildir. Sistem Watt/kWh tahmini üretmez. Daha kısa CPU süresi daha az enerji anlamına gelir, ancak bu sistem enerjiyi doğrudan ölçmez.
+> Ölçülen değer **çalışma süresidir**; sistem enerjiyi ölçmez. Arayüzdeki **kWh değeri bir tahmindir**: ölçülen süre farkı, iki varsayımla (işlemci gücü `CPU_POWER_WATTS`, fonksiyonun günde kaç kez çalıştığı `RUNS_PER_DAY`) yıllık enerjiye çevrilir. Gerçek tüketim donanıma ve kullanıma bağlıdır. Ayrıntı: [Tahmini enerji etkisi](#tahmini-enerji-etkisi).
 
 ---
 
@@ -82,7 +82,14 @@ Sonuçlar **tür dahil** karşılaştırılır (`1` ile `1.0` farklıdır). Ayn�
 
 Türetilmiş girdiler önemlidir. Gerçek denemelerde LLM'in seçtiği küçük girdilerde tesadüfen doğru çıkan sıra hataları (ör. `list(set(...))`) yalnızca bunlarla yakalandı.
 
-**3. Ölçüm.** LLM'in verdiği benchmark ifadesi (~5000 eleman) aynı rastgele tohumla üretilir ve her iki sürüm `timeit` ile ölçülür (3 tekrarın en iyisi). LLM ifade vermezse örnek girdiden 2000 elemanlı **otomatik girdi** üretilir; bu girdi en kötü durumu temsil etmeyebilir ve arayüzde öyle belirtilir. Benchmark girdisinde de sonuçlar karşılaştırılır. Hata veren ya da farklı sonuç üreten ölçümler hızlanma hesabına katılmaz.
+**3. Ölçüm.** LLM'in verdiği benchmark ifadesi (~5000 eleman) aynı rastgele tohumla üretilir ve her iki sürüm `timeit` ile ölçülür (3 tekrarın en iyisi). LLM ifade vermezse örnek girdiden 2000 elemanlı **otomatik girdi** üretilir; bu girdi en kötü durumu temsil etmeyebilir ve arayüzde öyle belirtilir.
+
+**En kötü durum girdisi.** Bir şey arayıp bulunca erken dönen fonksiyonlarda (döngü içinde `return`, AST ile bulunur) ölçüm, eşleşme hemen bulunursa gerçek farkı gizler. Örneğin `find_pair` için çifti hemen bulan bir girdi 1,5× gösterirken eşleşmesiz girdi ~270× gösterir. Bu yüzden:
+- LLM'den bu fonksiyonlarda eşleşmenin hiç bulunmadığı ya da en sonda bulunduğu bir girdi üretmesi istenir (ör. two-sum için ulaşılamayan hedef).
+- Ölçümden önce orijinal fonksiyon girdiyle bir kez çalıştırılır ve `sys.setprofile` ile hangi `return` satırından döndüğüne bakılır. Erken dönüyorsa sistem eşleşmesiz bir girdi arar: tekrarsız tamsayı listeleri ve ulaşılamaz (±10⁹+7) tamsayı argümanları. Bulduğu girdiyi kullanır ve LLM'in girdisinin değiştirildiğini arayüzde belirtir.
+- Eşleşmesiz girdi bulunamazsa (ör. her girdide ilk elemanda dönen fonksiyon) ölçüm yine yapılır, ama kazancın olduğundan küçük görünebileceği uyarısı gösterilir.
+
+Benchmark girdisinde de sonuçlar karşılaştırılır. Hata veren ya da farklı sonuç üreten ölçümler hızlanma hesabına katılmaz.
 
 **4. Geri bildirim.** Doğrulama başarısız olursa, uyuşmayan girdi farkı koruyarak **en küçük karşı örneğe** indirilir (ör. 40 elemanlı liste → `[1, 2, 2, 1]`: beklenen `[1, 2]`, üretilen `[2, 1]`). Sonuçların yalnızca sırası farklıysa LLM'e "set'in sırası tanımsızdır; dict/Counter kullan" ipucu eklenir. Bu geri bildirimle bir kez daha denenir. Karşı örnek arayüzdeki eşdeğerlik tablosunda da gösterilir.
 
@@ -94,9 +101,10 @@ Türetilmiş girdiler önemlidir. Gerçek denemelerde LLM'in seçtiği küçük 
 │   ├── app/
 │   │   ├── main.py        FastAPI uç noktaları, CORS, statik frontend
 │   │   ├── analyzer.py    AST analizi (LLM yok)
-│   │   ├── patterns.py    Yeşil Kod Desenleri başlangıç verisi (tek kaynak)
+│   │   ├── patterns.py    Yeşil Kod Desenleri başlangıç verisi (ilk kurulum)
 │   │   ├── db.py          Modeller: green_patterns, analysis_runs
 │   │   ├── rag.py         Kural tabanlı desen getirme
+│   │   ├── report.py      Rapor sekmesi istatistikleri (analysis_runs)
 │   │   ├── llm.py         Ollama / Gemini sağlayıcıları
 │   │   ├── verifier.py    Alt süreçte doğrulama ve ölçüm
 │   │   └── config.py      Ortam değişkenleri
@@ -111,8 +119,8 @@ Türetilmiş girdiler önemlidir. Gerçek denemelerde LLM'in seçtiği küçük 
 
 ### Yeşil Kod Desenleri
 
-| Kod   | Tespit edilen sorun                              | Çözüm                                   | Etki   |
-|-------|--------------------------------------------------|-----------------------------------------|--------|
+| Kod   | Tespit edilen sorun                              | Çözüm                                   | Varsayılan etki |
+|-------|--------------------------------------------------|-----------------------------------------|-----------------|
 | YK-01 | İç içe döngü                                     | set/dict ile tek geçiş                  | yüksek |
 | YK-02 | Döngüde listede `in` / `not in`                  | `set` ile üyelik kontrolü               | yüksek |
 | YK-03 | Döngüde string `+=`                              | `"".join(...)`                          | düşük  |
@@ -126,9 +134,15 @@ Türetilmiş girdiler önemlidir. Gerçek denemelerde LLM'in seçtiği küçük 
 
 Desenlerin tam metni ve önce/sonra örnekleri arayüzdeki **Yeşil Kod Desenleri** sekmesinde ve `GET /api/patterns` ucunda bulunur.
 
-Onaylı desenlerin tek kaynağı `backend/app/patterns.py` dosyasıdır. Uygulama her açılışta `green_patterns` tablosunu bu dosyayla **eşitler**: eksik desenler eklenir, içeriği değişmiş olanlar güncellenir. Böylece katalogdaki düzeltmeler mevcut kurulumlara da ulaşır. Dosyada olmayan (kuruma özel eklenmiş) kayıtlara dokunulmaz; ancak YK-01…YK-10 kodlu kayıtlarda veritabanında yapılan elle düzenlemeler bir sonraki açılışta geri alınır.
+**Asıl kaynak veritabanıdır** (`green_patterns` tablosu). `backend/app/patterns.py` yalnızca başlangıç verisidir: backend her açıldığında tabloda **olmayan** desenler bu dosyadan eklenir, mevcut kayıtların üzerine yazılmaz. Bu yüzden:
 
-> Örnekler önemlidir: modeller desen örneklerini sık sık birebir kopyalar. YK-05'in ilk sürümündeki örnek, birden fazla çift olduğunda orijinalden farklı bir çift döndürüyordu; eşdeğerlik testi bunu yakaladı ve örnek, sırayı koruyan sürümle değiştirildi. Yeni bir desen eklerken örneği orijinalle rastgele girdilerde karşılaştırın.
+- Kurum, desenlerin sorun açıklamasını, çözümünü, önce/sonra örneklerini ve etki düzeyini **Yeşil Kod Desenleri** sekmesindeki **Düzenle** düğmesiyle (veya `PUT /api/patterns/{code}`) değiştirebilir. Değişiklikler yeniden başlatmada korunur.
+- Her desen **aktif/pasif** yapılabilir (`PATCH /api/patterns/{code}/active`). Pasif desenler analizde raporlanmaz ve RAG ile LLM'e gönderilmez. Kodda yalnızca pasif desenler bulunursa sonuç "israf tespit edilmedi" olur ve LLM çağrılmaz. Karmaşıklık tahmini yine gösterilir.
+- Analizci desen başlığını, etki düzeyini ve aktif/pasif durumunu veritabanından alır. Tespit kuralları ise kodda (`analyzer.py`) olduğundan arayüzden **yeni desen eklenemez**; yeni bir desen türü için tespit kuralı yazılması gerekir.
+- `patterns.py` dosyasında yapılan bir değişiklik mevcut kurulumlara **yansımaz** (yalnızca yeni kurulumlarda veya tabloda eksik olan desenlerde kullanılır). Mevcut bir kurulumda güncellemek için arayüzü kullanın.
+- Eski sürümle oluşturulmuş bir veritabanında `is_active` ve `updated_at` sütunları açılışta otomatik eklenir. Mevcut desenler aktif kalır, veri kaybolmaz.
+
+> Örnekler önemlidir: modeller desen örneklerini sık sık birebir kopyalar. YK-05'in ilk sürümündeki örnek, birden fazla çift olduğunda orijinalden farklı bir çift döndürüyordu; eşdeğerlik testi bunu yakaladı ve örnek, sırayı koruyan sürümle değiştirildi. Bir desenin örneğini düzenlerken "sonra" örneğinin "önce" ile aynı sonucu verdiğinden emin olun.
 
 ---
 
@@ -200,6 +214,7 @@ Testler LLM'i taklit eder (mock); Ollama'nın çalışması gerekmez. Doğrulay�
 cd frontend
 npm install
 npm run dev                    # http://localhost:5173
+npm test                       # arayüz testleri (Vitest + Testing Library)
 ```
 
 Geliştirme sunucusu `/api` isteklerini Vite proxy üzerinden `http://localhost:8000` adresine yönlendirir.
@@ -244,6 +259,8 @@ Değişkenler `backend/app/config.py` tarafından okunur. Örnek dosya: `backend
 | `GEMINI_API_KEY` | —                                   | Yalnızca `LLM_PROVIDER=gemini` iken gerekir |
 | `GEMINI_MODEL`   | `gemini-2.5-flash`                  | Gemini model adı |
 | `LLM_TIMEOUT`    | `300`                               | Tek bir LLM isteği için zaman aşımı (saniye) |
+| `CPU_POWER_WATTS` | `65`                               | Enerji **tahmini** varsayımı: işlemcinin çalışırken çektiği güç (W). Arayüzde sonuç başına değiştirilebilir |
+| `RUNS_PER_DAY`   | `10000`                             | Enerji **tahmini** varsayımı: optimize edilen fonksiyonun günde kaç kez çalıştığı |
 
 Backend `.env` dosyasını **kendiliğinden okumaz**. Yerel geliştirmede değişkenleri kabukta tanımlayın:
 
@@ -271,6 +288,23 @@ Varsayılan model, kod için eğitilmiş `qwen2.5-coder:7b`'dir. Genel amaçlı 
 
 ---
 
+## Tahmini enerji etkisi
+
+Sistem enerjiyi **ölçmez**, yalnızca çalışma süresini ölçer. Doğrulanmış ve daha hızlı bir optimizasyonda ölçülen süre farkı, varsayımlarla enerjiye çevrilir (`backend/app/energy.py`, tek fonksiyon):
+
+```text
+tek çalıştırma başına tasarruf (J)  = (eski_süre − yeni_süre) × CPU_POWER_WATTS
+yıllık tahmini tasarruf (kWh)       = J × RUNS_PER_DAY × 365 / 3.600.000
+```
+
+Örnek: 0,4 s kazanç × 65 W = 26 J; günde 10.000 kez çalışan bir fonksiyon için ≈ 26,4 kWh/yıl.
+
+- Yeni kod daha yavaşsa (veya aynı hızdaysa), süre ölçülemediyse ya da doğrulama başarısızsa tahmin **gösterilmez**.
+- "Ölçülen süre" kartındaki **Tahmini enerji etkisi** bölümünde iki varsayım değiştirilebilir; sonuç anında aynı backend fonksiyonuyla (`POST /api/energy/estimate`) yeniden hesaplanır. Kartta değiştirilen değerler kaydedilmez.
+- Rapor sekmesi, her benzersiz kodun en son doğrulanmış ve hızlanmış optimizasyonunun tahminini ortam değişkenlerindeki varsayımlarla hesaplayıp toplar. Aynı kodun tekrarlanan analizleri bir kez sayılır.
+
+---
+
 ## API uçları
 
 Tüm uçlar `/api` altındadır. Etkileşimli belgeler için `/docs` adresine bakın.
@@ -278,10 +312,14 @@ Tüm uçlar `/api` altındadır. Etkileşimli belgeler için `/docs` adresine ba
 | Yöntem | Yol             | Açıklama |
 |--------|-----------------|----------|
 | GET    | `/api/health`   | Veritabanı durumu, seçili LLM sağlayıcısı/modeli ve erişilebilirliği. Her iki bileşen de çalışıyorsa `status` alanı `"ok"`, değilse `"degraded"` olur; HTTP kodu her durumda 200'dür. |
-| GET    | `/api/patterns` | Yeşil Kod Desenleri listesi |
+| GET    | `/api/patterns` | Yeşil Kod Desenleri listesi (`is_active`, `updated_at` dahil) |
+| PUT    | `/api/patterns/{code}` | Desenin `anti_pattern`, `solution`, `impact`, `example_before`, `example_after` alanlarını günceller. Başlık değiştirilemez. Geçersiz etki düzeyi (`yüksek`/`orta`/`düşük` dışında), boş metin veya sözdizimi hatalı örnek → **400**; bilinmeyen kod → 404 |
+| PATCH  | `/api/patterns/{code}/active` | `{"is_active": true\|false}` ile deseni aktif/pasif yapar; bilinmeyen kod → 404 |
 | POST   | `/api/analyze`  | Yalnızca AST analizi; LLM kullanmaz, hızlıdır |
 | POST   | `/api/optimize` | Analiz → LLM ile yeniden yazım → doğrulama → kayıt |
 | GET    | `/api/history`  | Son 20 çalıştırma (en yeni önce) |
+| POST   | `/api/energy/estimate` | `{old_seconds, new_seconds, watts, runs_per_day}` için tahmini enerji (`{"estimate": {joules_per_run, kwh_per_year, watts, runs_per_day}}` veya yavaşlama/ölçüm yoksa `{"estimate": null}`). `watts` ve `runs_per_day` pozitif olmalı (aksi halde 422) |
+| GET    | `/api/report`   | Kurum geneli özet: toplam analiz ve durum dağılımı, doğrulama başarı oranı (optimize / (optimize + başarısız)), benzersiz kod sayısı (`unique_codes`), en sık tespit edilen desenler, doğrulanmış optimizasyonlarda toplam/medyan süre kazancı, yüksek ve düşük etkili optimizasyonlar için ayrı medyan hızlanma (`savings.speedup_groups`), en çok kazanç sağlayan 5 analiz, toplam **tahmini** yıllık enerji tasarrufu (`savings.energy`). Toplam analiz ve başarı oranı tüm çalıştırmaları sayar; diğer değerlerde aynı kodun (boşluk/satır sonu farkları normalize edilerek) yalnızca en son başarılı analizi sayılır. Kayıt yoksa sıfırlar ve boş listeler döner |
 
 ### `POST /api/analyze`
 
@@ -333,6 +371,10 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
     "timed_out": false,
     "error": null
   },
+  "energy": {                            // TAHMİN (ölçüm değil); doğrulanmamış veya yavaşlamış sonuçta null
+    "joules_per_run": 25.66, "kwh_per_year": 26.02,
+    "watts": 65, "runs_per_day": 10000
+  },
   "notes": "",
   "warnings": [],
   "attempts": 1,
@@ -347,7 +389,7 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
   - `minimal`: uyuşmazlığın en küçük karşı örneği `{input, old, new}`.
 - `benchmark.functions[].auto=true` ise ölçüm girdisi otomatik üretilmiştir.
 - Bulgu yoksa LLM **hiç çağrılmaz** ve `status="clean"`, `message="Algoritmik enerji israfı tespit edilmedi"` döner.
-- `status="failed"` durumunda, varsa son üretilen kod ve doğrulama ayrıntısı yine yanıtta yer alır. Arayüz üstte kırmızı "Doğrulanmış optimizasyon üretilemedi" kartını ve hata ayrıntısını gösterir; son üretilen kod incelenebilmesi için kod karşılaştırmasında yine görünür (kopyalanabilir). Bu kod kullanılmamalıdır.
+- `status="failed"` durumunda, varsa son üretilen kod ve doğrulama ayrıntısı yine yanıtta yer alır. Arayüz üstte kırmızı "Doğrulanmış optimizasyon üretilemedi" kartını ve hata ayrıntısını gösterir. Kod, hatanın incelenebilmesi için karşılaştırmada görünür ama yanında kırmızı **"Önerilmez"** etiketi vardır ve **"Yeşil Kodu Kopyala" düğmesi gizlenir**. Geçmiş sekmesinden "Editöre yükle" ile açılan başarısız kayıtlarda da aynı kurallar geçerlidir.
 - Sözdizimi hatalı kodda LLM çağrılmaz ve `status="failed"` döner. Hata, `error` alanında satır numarasıyla belirtilir.
 
 ---
@@ -360,7 +402,17 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
   - Ağaç dolaşan çift özyineleme yanlışlıkla `O(2^N)` sayılabilir.
   - Kütüphane çağrılarının maliyeti bilinmez.
 - **Desen tespiti sezgiseldir.** Yanlış pozitif ve yanlış negatif sonuçlar olabilir. Örneğin YK-02 yalnızca fonksiyon içinde liste olarak oluşturulan değişkenleri işaretler, parametreleri işaretlemez.
-- **Ölçüm enerji değil, süredir.** Ölçüm tek bir benchmark girdisiyle (LLM'in ifadesi ya da otomatik üretilen girdi), sunucunun o anki yükünde yapılır. Girdi en kötü durumu temsil etmeyebilir; örneğin `find_pair` için çifti hemen bulan bir girdi hızlanmayı küçük gösterir. Sonuçlar donanıma bağlıdır ve bir eğilim gösterir.
+- **Rapor sekmesi kaydedilmiş analizlerin toplamıdır.**
+  - Tekrarlanan kodlar, orijinal kodun normalize edilmiş (satır sonları, sekmeler, satır sonu/satır içi boşluklar, boş satırlar, ortak girinti) hâlinin hash'iyle bulunur. Toplamlarda, desen sıklığında ve en çok kazanç tablosunda yalnızca kodun **en son başarılı** analizi sayılır; hiç başarılı analizi olmayan kodun yalnızca en son analizi desen sıklığına girer. Toplam analiz sayısı ve başarı oranı tüm çalıştırmaları sayar. Yorum, değişken adı veya girinti yapısı farklı kodlar ayrı kod sayılır.
+  - "Benzersiz fonksiyon" sayısı aslında benzersiz **kod parçası** sayısıdır; tek bir analizde birden çok fonksiyon olabilir.
+  - Hızlanma tek bir medyanla değil, iki grupta gösterilir: en az bir yüksek etkili desen (YK-01, 02, 05, 06, 07, 08) içeren optimizasyonlar ve yalnızca düşük etkili desen (YK-03, 04, 09, 10) içerenler. Gruplar desen koduna göre sabittir; desen yönetim ekranında etki düzeyi değiştirilse de gruplar değişmez. Bir grupta 3 veya daha az benzersiz kod varsa medyan yerine değerler fonksiyon adlarıyla tek tek gösterilir (2 değerin medyanı ortalamadır ve hiçbir analizi temsil etmez); 4 ve üzerinde medyan gösterilir.
+  - Süre kazancı yalnızca doğrulanmış (`optimized`) ve iki süresi de ölçülmüş kayıtlardan hesaplanır; değerler her analizdeki tek benchmark girdisine ve o anki sunucu yüküne bağlıdır, toplanmaları kurumun gerçek üretim tasarrufunu göstermez. Hızlı Analiz (`/api/analyze`) kaydedilmediği için rapora girmez.
+- **Ölçülen değer süredir; kWh bir tahmindir.** Sistem enerji ölçmez (güç ölçer, RAPL vb. kullanılmaz). kWh değeri ölçülen süre farkının iki varsayımla çarpılmasıdır:
+  - İşlemcinin tamamının fonksiyon boyunca sabit `CPU_POWER_WATTS` çektiği varsayılır. Gerçekte güç çekirdek sayısına, frekansa, boşta tüketime ve diğer yüklere bağlıdır; bellek, disk ve ağ tüketimi hesaba katılmaz.
+  - `RUNS_PER_DAY` kurumun gerçek kullanımını bilmez. Değer 10 kat yanlışsa tahmin de 10 kat yanlıştır.
+  - Benchmark girdisindeki süre farkı her gerçek çağrıya genellenir; gerçek girdiler daha küçükse kazanç ve tahmin abartılı olur.
+  - Rapordaki toplam, her benzersiz kodu bir kez sayar ama her birinin günde `RUNS_PER_DAY` kez çalıştığını varsayar; kurumun gerçek tasarrufu olarak sunulmamalıdır.
+- **Süre ölçümü tek bir girdiye dayanır.** Ölçüm tek bir benchmark girdisiyle (LLM'in ifadesi ya da otomatik üretilen girdi), sunucunun o anki yükünde yapılır. Erken dönen arama fonksiyonlarında en kötü durum (eşleşmesiz) girdi aranır, ama bu yalnızca tamsayı listeleri ve tamsayı argümanları için yapılır; string/sözlük alan veya erken dönüşü döngü dışında olan fonksiyonlarda girdi en kötü durumu temsil etmeyebilir. Sonuçlar donanıma bağlıdır ve bir eğilim gösterir.
 - **Eşdeğerlik testi bir kanıt değildir.** Doğrulama yalnızca denenen girdilerde (LLM'in ≥4 girdisi, sistemin türettiği sıralı/ters/rastgele girdiler ve benchmark girdisi) aynı sonucu gösterir:
   - Girdiler yalnızca JSON değerlerinden oluşabilir. Rastgele girdi türetme yalnızca sayı ve string listeleri için yapılır; sözlük veya iç içe yapılar alan fonksiyonlar daha zayıf test edilir.
   - Türetilmiş girdiler fonksiyonun ön koşullarını bozabilir (ör. sıralı liste bekleyen bir fonksiyona ters liste verilmesi). Bu durumda orijinal kodla aynı davranmayan, ama gerçek kullanımda doğru olan bir optimizasyon reddedilebilir.
@@ -373,4 +425,11 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
   - Daha güçlü yalıtım için gVisor / Kata Containers, ağsız ayrı bir yürütücü container veya ağ politikalarıyla dış erişimin kapatılması önerilir.
 - **LLM çıktısı güvenilir değildir.** Model yanlış veya yarım kod üretebilir. Sistem bu kodu sözdizimi, fonksiyon imzası ve eşdeğerlik testiyle süzer ama tam doğruluğu garanti edemez.
 - **Başarı oranı modele ve koda bağlıdır.** 7–8B'lik yerel modeller basit dönüşümlerde (döngüden çıkarma, `join`) güvenilirdir; sırayı koruma gibi ince anlam gerektiren dönüşümlerde ilk denemede sık hata yapar (bkz. [Model seçimi](#model-seçimi)). Başarısız sonuç, sistemin yanlış kodu reddettiği anlamına gelir; orijinal kod kullanılmaya devam edilmelidir.
-- **Kimlik doğrulama yoktur.** Panel, güvenilir bir iç ağda kullanılmak üzere tasarlanmıştır. Dışarıya açılacaksa önüne kimlik doğrulama yapan bir ters vekil (reverse proxy) konulmalıdır.
+- **Desen yönetimi sınırlıdır.**
+  - Yeni desen türü arayüzden eklenemez; tespit kuralları `analyzer.py` içindedir.
+  - Desen başlığı ve kodu değiştirilemez.
+  - Düzenleme geçmişi tutulmaz: yalnızca son değişiklik zamanı (`updated_at`) saklanır, eski metne geri dönülemez.
+  - Desen düzenlemeleri doğrulanmaz: "sonra" örneğinin gerçekten daha verimli ve "önce" ile eşdeğer olduğu kontrol edilmez (yalnızca Python sözdizimi denetlenir). Hatalı bir örnek LLM'i yanlış yönlendirebilir; bu durumda bile eşdeğerlik testi yanlış kodu reddeder.
+  - Geçmiş kayıtlarındaki bulgular, analiz anındaki desen ayarlarıyla saklanır; sonradan pasif yapılan bir desen eski kayıtlarda görünmeye devam eder.
+- **Başarısız öneriler API yanıtında yer alır.** Arayüz başarısız kodu "Önerilmez" olarak işaretler ve kopyalanmasını engeller, ancak kod `/api/optimize` ve `/api/history` yanıtlarında bulunur. API'yi doğrudan kullanan istemciler `status` alanını kontrol etmelidir.
+- **Kimlik doğrulama yoktur.** Panel, güvenilir bir iç ağda kullanılmak üzere tasarlanmıştır. Panele erişen herkes desenleri düzenleyebilir ve pasif yapabilir. Dışarıya açılacaksa önüne kimlik doğrulama yapan bir ters vekil (reverse proxy) konulmalıdır.

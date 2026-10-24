@@ -1,4 +1,6 @@
-import { IMPACT_CLASS, formatSeconds, formatSpeedup } from '../format.js'
+import { useEffect, useState } from 'react'
+import { api } from '../api.js'
+import { IMPACT_CLASS, energyAssumptionNote, formatEstimate, formatSeconds, formatSpeedup } from '../format.js'
 
 export function ImpactBadge({ impact }) {
   return <span className={`badge impact-${IMPACT_CLASS[impact] ?? 'low'}`}>{impact}</span>
@@ -86,7 +88,72 @@ export function ComplexityCard({ before, after }) {
   )
 }
 
-export function BenchmarkCard({ benchmark }) {
+/** Ölçülen süre farkından TAHMİNİ enerji etkisi. Varsayımlar kartta değiştirilebilir; hesap backend'de
+ *  (energy.py) yapılır, böylece formül tek yerdedir. */
+export function EnergyEstimate({ initial, oldSeconds, newSeconds }) {
+  const [watts, setWatts] = useState(String(initial.watts))
+  const [runs, setRuns] = useState(String(initial.runs_per_day))
+  const [estimate, setEstimate] = useState(initial)
+  const [error, setError] = useState(null)
+
+  const w = Number(watts)
+  const r = Number(runs)
+  const valid = watts !== '' && runs !== '' && w > 0 && r > 0
+
+  useEffect(() => {
+    if (!valid) return
+    if (w === initial.watts && r === initial.runs_per_day) {
+      setEstimate(initial)
+      setError(null)
+      return
+    }
+    let current = true // eski istekler yeni sonucun üzerine yazmasın
+    const id = setTimeout(() => {
+      api
+        .energyEstimate({ old_seconds: oldSeconds, new_seconds: newSeconds, watts: w, runs_per_day: r })
+        .then((body) => current && (setEstimate(body.estimate), setError(null)))
+        .catch((e) => current && setError(e.message))
+    }, 150)
+    return () => {
+      current = false
+      clearTimeout(id)
+    }
+  }, [valid, w, r, initial, oldSeconds, newSeconds])
+
+  return (
+    <div className="energy">
+      <div className="energy-header">
+        <h4>Tahmini enerji etkisi</h4>
+        <span className="badge estimate-badge">Tahmin · ölçüm değil</span>
+      </div>
+      {valid && estimate ? (
+        <div className="energy-value">
+          <span className="energy-number">≈ {formatEstimate(estimate.kwh_per_year)} kWh</span>
+          <span className="speedup-label">yıllık tasarruf</span>
+        </div>
+      ) : (
+        <p className="muted small">{valid ? 'Tahmin hesaplanamadı.' : 'Varsayımlar pozitif sayı olmalı.'}</p>
+      )}
+      {valid && estimate && (
+        <p className="muted small">Çalıştırma başına ≈ {formatEstimate(estimate.joules_per_run)} J</p>
+      )}
+      <div className="energy-inputs">
+        <label className="field field-inline">
+          <span>İşlemci gücü (W)</span>
+          <input type="number" min="1" step="1" value={watts} onChange={(e) => setWatts(e.target.value)} />
+        </label>
+        <label className="field field-inline">
+          <span>Günde çalışma sayısı</span>
+          <input type="number" min="1" step="1000" value={runs} onChange={(e) => setRuns(e.target.value)} />
+        </label>
+      </div>
+      {error && <p className="error-text">{error}</p>}
+      <p className="footnote">{valid ? energyAssumptionNote(w, r) : 'Gerçek tüketim donanıma ve kullanıma bağlıdır.'}</p>
+    </div>
+  )
+}
+
+export function BenchmarkCard({ benchmark, energy }) {
   if (!benchmark || benchmark.old_seconds == null || benchmark.new_seconds == null) {
     const reason =
       benchmark?.error ||
@@ -131,16 +198,28 @@ export function BenchmarkCard({ benchmark }) {
           {benchmark.functions.filter((f) => f.error).map((f) => `${f.function}: ${f.error}`).join(' · ')}
         </p>
       )}
-      {benchmark.functions?.some((f) => f.auto) && (
+      {benchmark.functions?.some((f) => f.auto && f.worst_case == null) && (
         <p className="footnote warn-text">
           Ölçüm girdisi sistem tarafından örnek girdilerden otomatik üretildi; en kötü durumu temsil
           etmeyebilir.
         </p>
       )}
+      {benchmark.functions?.filter((f) => f.note).map((f) => (
+        <p className="footnote" key={`note-${f.function}`}>{f.function}: {f.note}</p>
+      ))}
+      {benchmark.functions?.filter((f) => f.worst_case === false).map((f) => (
+        <p className="footnote warn-text" key={`worst-${f.function}`}>
+          {f.function}: eşleşmesiz (en kötü durum) girdi bulunamadı; fonksiyon ölçümde erken döndü, kazanç
+          olduğundan küçük görünebilir.
+        </p>
+      ))}
       <p className="footnote">
-        <strong>Gerçek ölçüm:</strong> iki sürüm aynı rastgele girdiyle yalıtılmış bir süreçte çalıştırıldı
-        (timeit, 3 tekrarın en iyisi). Sonuç sunucu donanımına bağlıdır; enerji (Watt/kWh) değeri değildir.
+        <strong>Gerçek ölçüm (süre):</strong> iki sürüm aynı rastgele girdiyle yalıtılmış bir süreçte
+        çalıştırıldı (timeit, 3 tekrarın en iyisi). Ölçüm, mümkün olduğunda en kötü durum girdisiyle yapılır.
+        Sonuç sunucu donanımına bağlıdır. Enerji ölçülmez; aşağıdaki
+        kWh değeri bu süre farkından varsayımlarla hesaplanan bir tahmindir.
       </p>
+      {energy && <EnergyEstimate key={`${oldS}:${newS}`} initial={energy} oldSeconds={oldS} newSeconds={newS} />}
     </section>
   )
 }

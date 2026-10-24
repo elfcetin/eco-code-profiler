@@ -1,7 +1,7 @@
 """LLM istemine eklenecek Yeşil Kod Desenlerini getirir.
 
 Şimdilik kural tabanlı: analyzer'ın tespit ettiği desen kodlarıyla birebir
-eşleşen kayıtlar veritabanından çekilir.
+eşleşen AKTİF kayıtlar veritabanından çekilir; pasif desenler LLM'e gönderilmez.
 
 TODO: İleride embedding tabanlı benzerlik araması eklenebilir (ör. pgvector
 ile desen açıklamalarının vektörleri saklanıp kullanıcı koduna en yakın
@@ -22,14 +22,14 @@ from .db import GreenPattern, SessionLocal
 def retrieve(pattern_codes: Iterable[str], session: Session | None = None) -> list[dict[str, str]]:
     """Verilen desen kodlarının kayıtlarını, ilk görülme sırasıyla ve tekrarsız döndürür.
 
-    Veritabanında olmayan kodlar sessizce atlanır.
+    Veritabanında olmayan veya pasif yapılmış desenler sessizce atlanır.
     """
     codes = list(dict.fromkeys(pattern_codes))
     if not codes:
         return []
 
     def _query(s: Session) -> list[dict[str, str]]:
-        rows = s.scalars(select(GreenPattern).where(GreenPattern.code.in_(codes))).all()
+        rows = s.scalars(select(GreenPattern).where(GreenPattern.code.in_(codes), GreenPattern.is_active)).all()
         by_code = {row.code: row.to_dict() for row in rows}
         return [by_code[c] for c in codes if c in by_code]
 

@@ -276,3 +276,99 @@ def test_failing_input_is_shrunk_to_minimal_counterexample():
     assert len(shrunk) == 4 and set(shrunk) <= {1, 2}  # ör. [1, 2, 2, 1]
     assert sorted(ast.literal_eval(minimal["old"])) == sorted(ast.literal_eval(minimal["new"]))
     assert minimal["old"] != minimal["new"]
+
+
+# --------------------------------------------------------------------------- #
+# En kötü durum ölçüm girdisi (erken dönen arama fonksiyonları)
+# --------------------------------------------------------------------------- #
+
+from app.verifier import early_return_lines  # noqa: E402
+
+FIND_PAIR = """\
+def find_pair(numbers, target):
+    for i in range(len(numbers)):
+        for j in range(i + 1, len(numbers)):
+            if numbers[i] + numbers[j] == target:
+                return (i, j)
+    return None
+"""
+
+FIND_PAIR_GREEN = """\
+from bisect import bisect_right
+
+def find_pair(numbers, target):
+    positions = {}
+    for idx, x in enumerate(numbers):
+        positions.setdefault(x, []).append(idx)
+    for i, x in enumerate(numbers):
+        later = positions.get(target - x)
+        if later:
+            k = bisect_right(later, i)
+            if k < len(later):
+                return (i, later[k])
+    return None
+"""
+
+PAIR_INPUTS = {"find_pair": [[[1, 2, 3, 4], 5], [[], 3], [[5], 10], [[3, 3], 6], [[1, 2], 10]]}
+
+
+def test_early_return_lines():
+    source = (
+        "def search(a, t):\n"          # 1
+        "    for x in a:\n"            # 2
+        "        if x == t:\n"         # 3
+        "            return x\n"       # 4  döngü içinde
+        "    return None\n"            # 5  döngü dışında
+        "\n"
+        "def total(a):\n"              # 7
+        "    def inner(b):\n"
+        "        for y in b:\n"
+        "            return y\n"       # iç fonksiyon: sayılmaz
+        "    return sum(a)\n"
+        "\n"
+        "class Index:\n"
+        "    def find(self, k):\n"     # 14
+        "        while True:\n"
+        "            return k\n"       # 16
+    )
+    assert early_return_lines(source) == {"search": [4], "Index.find": [16]}
+    assert early_return_lines("def f(:\n") == {}
+
+
+def test_auto_benchmark_uses_no_match_input_for_early_return():
+    result = verify(FIND_PAIR, FIND_PAIR_GREEN, PAIR_INPUTS)  # LLM benchmark ifadesi yok
+    entry = result["benchmark"]["functions"][0]
+    assert result["passed"] is True
+    assert entry["auto"] is True and entry["worst_case"] is True and entry["note"] is None
+    # Eşleşme olmayınca orijinal O(N²) kodun tamamı çalışır: fark yüzlerce kat.
+    assert result["benchmark"]["speedup"] > 50
+
+
+def test_llm_input_with_early_match_is_replaced_by_worst_case():
+    reachable = {"find_pair": "[[random.randint(0, 10000) for _ in range(5000)], 10000]"}
+    result = verify(FIND_PAIR, FIND_PAIR_GREEN, PAIR_INPUTS, reachable)
+    entry = result["benchmark"]["functions"][0]
+    assert entry["worst_case"] is True and entry["auto"] is True
+    assert "en kötü durum" in entry["note"]
+    assert result["benchmark"]["speedup"] > 50
+
+
+def test_llm_worst_case_input_is_kept():
+    unreachable = {"find_pair": "[[random.randint(0, 1000) for _ in range(1500)], -1]"}
+    result = verify(FIND_PAIR, FIND_PAIR_GREEN, PAIR_INPUTS, unreachable)
+    entry = result["benchmark"]["functions"][0]
+    assert entry["worst_case"] is True and entry["auto"] is False and entry["note"] is None
+
+
+def test_worst_case_not_found_is_reported():
+    first = "def first(items):\n    for x in items:\n        return x\n    return None\n"
+    result = verify(first, first, {"first": [[[3, 1, 2]], [[5]], [[]], [[1, 1]]]})
+    entry = result["benchmark"]["functions"][0]
+    assert entry["worst_case"] is False  # boş olmayan her girdide erken döner
+
+
+def test_functions_without_early_return_have_no_worst_case_flag():
+    old = "def total(items):\n    t = 0\n    for x in items:\n        t += x\n    return t\n"
+    new = "def total(items):\n    return sum(items)\n"
+    result = verify(old, new, {"total": [[[1, 2, 3]], [[]], [[5]], [[4, 4]]]})
+    assert result["benchmark"]["functions"][0]["worst_case"] is None

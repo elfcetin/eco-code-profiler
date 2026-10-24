@@ -75,6 +75,8 @@ services:
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
       LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
+      CPU_POWER_WATTS: ${CPU_POWER_WATTS:-65}
+      RUNS_PER_DAY: ${RUNS_PER_DAY:-10000}
     ports:
       - "8000:8000"
     # Kullanıcı kodu bu container içinde (alt süreçte) çalıştırıldığı için sıkılaştırma:

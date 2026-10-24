@@ -53,10 +53,13 @@ async function copyText(text) {
   }
 }
 
-function Pane({ title, cells }) {
+function Pane({ title, badge, cells }) {
   return (
     <div className="diff-pane">
-      <div className="diff-pane-title">{title}</div>
+      <div className="diff-pane-title">
+        {title}
+        {badge}
+      </div>
       <div className="diff-scroll">
         <div className="diff-lines">
           {cells.map((cell, i) => (
@@ -72,7 +75,8 @@ function Pane({ title, cells }) {
   )
 }
 
-export default function DiffView({ oldCode, newCode }) {
+/** failed: eşdeğerlik testi geçmedi; yeni kod önerilmez ve kopyalanamaz. */
+export default function DiffView({ oldCode, newCode, failed = false }) {
   const rows = useMemo(() => buildRows(oldCode, newCode), [oldCode, newCode])
   const [copied, setCopied] = useState(false)
 
@@ -86,13 +90,19 @@ export default function DiffView({ oldCode, newCode }) {
     <section className="card">
       <div className="card-header">
         <h3>Kod karşılaştırması</h3>
-        <button type="button" className="btn btn-secondary" onClick={handleCopy}>
-          {copied ? 'Kopyalandı ✓' : 'Yeşil Kodu Kopyala'}
-        </button>
+        {!failed && (
+          <button type="button" className="btn btn-secondary" onClick={handleCopy}>
+            {copied ? 'Kopyalandı ✓' : 'Yeşil Kodu Kopyala'}
+          </button>
+        )}
       </div>
       <div className="diff">
         <Pane title="Eski kod" cells={rows.map((r) => r.left)} />
-        <Pane title="Yeşil Kod" cells={rows.map((r) => r.right)} />
+        <Pane
+          title="Yeşil Kod"
+          badge={failed && <span className="badge fail" title="Eşdeğerlik testinden geçmedi">Önerilmez</span>}
+          cells={rows.map((r) => r.right)}
+        />
       </div>
     </section>
   )

@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Engine, Float, Integer, String, Text, create_engine, func, select
+from sqlalchemy import (
+    JSON, Boolean, DateTime, Engine, Float, Integer, String, Text, TypeDecorator, create_engine, inspect, select,
+    text, true,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -21,6 +24,41 @@ class Base(DeclarativeBase):
     pass
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_utc(value: datetime | None) -> str | None:
+    """ISO 8601, saat dilimiyle (ör. 2026-10-24T17:19:23+00:00)."""
+    return value.isoformat() if value else None
+
+
+class UTCDateTime(TypeDecorator):
+    """Zamanı UTC olarak saklar ve HER ZAMAN saat dilimli (UTC) datetime olarak döndürür.
+
+    SQLite saat dilimini saklamaz: değer UTC'ye çevrilip etiketsiz yazılır, okunurken UTC
+    etiketi geri eklenir. Uygulama zamanları baştan beri UTC ürettiğinden (`_utcnow`) eski
+    kayıtlar da doğru yorumlanır. PostgreSQL'de `timestamptz` zaten saat dilimlidir.
+    """
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:  # etiketsiz değerler UTC kabul edilir
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
 class GreenPattern(Base):
     __tablename__ = "green_patterns"
 
@@ -31,8 +69,13 @@ class GreenPattern(Base):
     impact: Mapped[str] = mapped_column(String(16))
     example_before: Mapped[str] = mapped_column(Text)
     example_after: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    updated_at: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(), default=_utcnow, onupdate=_utcnow
+    )
 
     def to_dict(self) -> dict[str, str]:
+        """Desenin içeriği (RAG ile LLM'e gönderilen alanlar)."""
         return {
             "code": self.code,
             "title": self.title,
@@ -43,14 +86,20 @@ class GreenPattern(Base):
             "example_after": self.example_after,
         }
 
+    def to_api_dict(self) -> dict:
+        """İçerik + yönetim alanları (desen yönetim ekranı için)."""
+        return {
+            **self.to_dict(),
+            "is_active": self.is_active,
+            "updated_at": iso_utc(self.updated_at),
+        }
+
 
 class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
-    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=_utcnow)
     original_code: Mapped[str] = mapped_column(Text)
     green_code: Mapped[str | None] = mapped_column(Text)
     findings: Mapped[list] = mapped_column(JSONType, default=list)
@@ -81,33 +130,54 @@ def configure_engine(url: str) -> Engine:
     return engine
 
 
-def sync_patterns(session: Session) -> dict[str, int]:
-    """green_patterns tablosunu patterns.py ile eşitler (tek kaynak patterns.py).
+def seed_patterns(session: Session) -> int:
+    """patterns.py'deki başlangıç desenlerinden tabloda OLMAYANLARI ekler.
 
-    Eksik desenler eklenir, içeriği değişmiş olanlar güncellenir; böylece katalogdaki
-    düzeltmeler mevcut kurulumlara da ulaşır. patterns.py'de olmayan kayıtlara dokunulmaz.
+    Asıl kaynak veritabanıdır: mevcut kayıtların (arayüzden yapılan düzenlemeler ve
+    aktif/pasif durumu dahil) üzerine yazılmaz. Eklenen kayıt sayısını döndürür.
     """
-    existing = {row.code: row for row in session.scalars(select(GreenPattern))}
-    added = updated = 0
-    for data in GREEN_PATTERNS:
-        row = existing.get(data["code"])
-        if row is None:
-            session.add(GreenPattern(**data))
-            added += 1
-        elif row.to_dict() != data:
-            for key, value in data.items():
-                setattr(row, key, value)
-            updated += 1
+    existing = set(session.scalars(select(GreenPattern.code)))
+    missing = [data for data in GREEN_PATTERNS if data["code"] not in existing]
+    session.add_all(GreenPattern(**data) for data in missing)
     session.commit()
-    return {"added": added, "updated": updated}
+    return len(missing)
+
+
+def _add_missing_columns(bind: Engine) -> None:
+    """Eski sürümde oluşturulmuş green_patterns tablosuna yeni sütunları ekler (veri korunur).
+
+    create_all mevcut tabloları değiştirmediği için gerekli. Yeni sütunlar NULL olabilir
+    veya varsayılan değerlidir; mevcut satırlar aktif kalır.
+    """
+    columns = {c["name"] for c in inspect(bind).get_columns(GreenPattern.__tablename__)}
+    table = GreenPattern.__table__
+    statements = []
+    if "is_active" not in columns:
+        true = "1" if bind.dialect.name == "sqlite" else "TRUE"
+        statements.append(f"ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {true}")
+    if "updated_at" not in columns:
+        statements.append(f"ADD COLUMN updated_at {table.c.updated_at.type.compile(dialect=bind.dialect)}")
+    if statements:
+        with bind.begin() as conn:
+            for stmt in statements:  # SQLite tek ALTER'da tek sütun kabul eder
+                conn.execute(text(f"ALTER TABLE {table.name} {stmt}"))
 
 
 def init_db(bind: Engine | None = None) -> None:
-    """Eksik tabloları oluşturur ve desen tablosunu patterns.py ile eşitler."""
+    """Eksik tabloları/sütunları oluşturur ve eksik başlangıç desenlerini ekler."""
     bind = bind or engine
     Base.metadata.create_all(bind)
+    _add_missing_columns(bind)
     with Session(bind) as session:
-        sync_patterns(session)
+        seed_patterns(session)
+
+
+def load_catalog(session: Session) -> dict[str, dict]:
+    """Analizci için desen kataloğu: kod -> {title, impact, is_active}."""
+    return {
+        row.code: {"title": row.title, "impact": row.impact, "is_active": row.is_active}
+        for row in session.scalars(select(GreenPattern))
+    }
 
 
 def get_session() -> Iterator[Session]:
