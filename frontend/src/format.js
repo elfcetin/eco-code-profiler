@@ -2,7 +2,9 @@ const nf = (digits) => new Intl.NumberFormat('tr-TR', { maximumFractionDigits: d
 
 export function formatSeconds(s) {
   if (s == null) return '—'
-  if (s < 1e-3) return `${nf(0).format(s * 1e6)} µs`
+  // 1 µs altı "0 µs" görünmesin: nanosaniye; 1 ns altı (ör. 0) "<1 ns".
+  if (s < 1e-6) return s * 1e9 < 1 ? '<1 ns' : `${nf(0).format(s * 1e9)} ns`
+  if (s < 1e-3) return `${nf(s < 1e-5 ? 1 : 0).format(s * 1e6)} µs`
   if (s < 1) return `${nf(1).format(s * 1e3)} ms`
   return `${nf(2).format(s)} sn`
 }

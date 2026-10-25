@@ -136,6 +136,20 @@ def fit_args(fn, args):
             return args
 
 
+def argument_changes(fn, before, old_args, new_args):
+    """Çağrı sonrası farklı kalan argümanlar: [{name, before, old, new}] (ad imzadan)."""
+    try:
+        names = list(inspect.signature(fn).bind(*before).arguments)
+    except (TypeError, ValueError):
+        names = []
+    changes = []
+    for i, (b, o, n) in enumerate(zip(before, old_args, new_args)):
+        if not values_equal(o, n):
+            name = names[i] if i < len(names) else f"{i + 1}. argüman"
+            changes.append({"name": name, "before": short(b, 200), "old": short(o, 200), "new": short(n, 200)})
+    return changes
+
+
 def binds(fn, args):
     """Argümanlar fonksiyon imzasına uyuyor mu?"""
     try:
@@ -211,7 +225,24 @@ def list_size(args):
     return max((len(a) for a in args if isinstance(a, list)), default=0)
 
 
+def input_size(args):
+    """Girdinin "büyüklüğü": dizi/sözlük/metin uzunlukları ve sayıların mutlak değerleri toplamı.
+
+    Liste dışı argüman alan fonksiyonlarda (ör. fib(n)) ölçüm için en büyük test girdisini seçer.
+    """
+    total = 0
+    for a in args:
+        if isinstance(a, bool):
+            continue
+        if isinstance(a, (int, float)):
+            total += abs(a)
+        elif isinstance(a, (str, list, tuple, dict, set)):
+            total += len(a)
+    return total
+
+
 BASES = {}  # fonksiyon -> rastgele girdi üretiminde örnek alınan geçerli girdi
+LARGEST = {}  # fonksiyon -> orijinal kodun hatasız çalıştığı en büyük test girdisi
 SHRUNK = set()  # en küçük karşı örneği bulunmuş fonksiyonlar
 
 
@@ -281,7 +312,10 @@ def run_case(name, old_fn, new_fn, args, derived=None):
         case.update(old=describe(old_out), new=describe(new_out), equal=equal, old_ok=old_out["ok"])
         if equal and not values_equal(old_args, new_args):
             case["equal"] = False
-            case["note"] = "Fonksiyonlar argümanları farklı biçimde değiştiriyor (yan etki farkı)."
+            case["side_effect"] = argument_changes(old_fn, args, old_args, new_args)
+            names = ", ".join(f"`{c['name']}`" for c in case["side_effect"]) or "argümanlar"
+            case["note"] = (f"Yan etki farkı: dönüş değerleri aynı, ama {names} çağrıdan sonra orijinal "
+                            "koddakinden farklı kalıyor.")
         elif not equal and old_out["ok"] and name not in SHRUNK:
             minimal = shrink(old_fn, new_fn, args)
             if minimal:
@@ -304,6 +338,8 @@ for name, inputs in P["test_inputs"].items():
             run_case(name, old_fn, new_fn, variant, derived=label)
         if case.get("old_ok") and list_size(args) > list_size(BASES.get(name, [])):
             BASES[name] = args
+        if case.get("old_ok") and (name not in LARGEST or input_size(args) > input_size(LARGEST[name])):
+            LARGEST[name] = args
     # LLM'in seçtiği girdilerden bağımsız, bol tekrarlı rastgele girdiler.
     if name in BASES:
         for k in range(3):
@@ -383,8 +419,34 @@ def worst_case_input(fn, base, lines):
     return None
 
 
-benchmarks = dict(P["benchmark_input"])
-for name in BASES:
+SOURCES = {"old": ("eco_original", P["original_code"]), "new": ("eco_green", P["green_code"])}
+REPEATS = 3
+
+
+def measure(label, name, args):
+    """En iyi süre (3 tekrar) ve son çıktı.
+
+    Her tekrardan ÖNCE kod temiz bir modülde yeniden exec edilir (timeit setup'ı; süreye
+    dahil değil). Böylece lru_cache/cache, modül düzeyindeki memo sözlükleri ve diğer global
+    durum tekrarlar arasında taşınmaz; aksi halde 2. ve 3. tekrar önbellekten anında döner ve
+    "en iyi" süre sahte olur. Eski ve yeni kod için aynı şekilde uygulanır.
+    """
+    module_name, source = SOURCES[label]
+    state = {}
+
+    def setup():
+        state["fn"] = get_fn(load(module_name, source), name)
+        state["args"] = copy.deepcopy(args)
+
+    def stmt():
+        state["out"] = call(state["fn"], state["args"])
+
+    times = timeit.Timer(stmt, setup).repeat(repeat=REPEATS, number=1)
+    return min(times), state["out"]
+
+
+benchmarks = {} if P.get("skip_benchmark") else dict(P["benchmark_input"])
+for name in () if P.get("skip_benchmark") else (*BASES, *LARGEST):
     benchmarks.setdefault(name, None)
 
 for name, expr in benchmarks.items():
@@ -398,7 +460,13 @@ for name, expr in benchmarks.items():
         continue
     try:
         if expr is None:
-            args = fuzz_args(BASES[name], random.Random(12345), AUTO_SIZE)
+            args = fuzz_args(BASES[name], random.Random(12345), AUTO_SIZE) if name in BASES else None
+            if args is None and name in LARGEST:
+                # Büyütülebilir liste yok (ör. fib(n)): test girdilerinin en büyüğüyle ölç.
+                args = LARGEST[name]
+                entry["note"] = (f"LLM ölçüm girdisi vermediği için test girdilerinin en büyüğüyle "
+                                 f"ölçüldü: {name}(*{short(args, 80)}). Bu girdi küçük olabilir; daha "
+                                 "büyük girdilerde fark farklı olabilir.")
             if args is None:
                 RESULT["benchmark"].pop()
                 continue
@@ -428,17 +496,14 @@ for name, expr in benchmarks.items():
         continue
 
     outcomes = {}
-    for label, fn in (("old", old_fn), ("new", new_fn)):
-        copies = iter([copy.deepcopy(args) for _ in range(3)])
-        holder = {}
-
-        def stmt(fn=fn, copies=copies, holder=holder):
-            holder["out"] = call(fn, next(copies))
-
-        times = timeit.repeat(stmt, repeat=3, number=1)
-        entry[label + "_seconds"] = min(times)
-        outcomes[label] = holder["out"]
+    try:
+        for label in ("old", "new"):
+            entry[label + "_seconds"], outcomes[label] = measure(label, name, args)
+            save()
+    except BaseException as exc:  # yeniden yükleme sırasında beklenmedik hata
+        entry["error"] = f"Ölçüm yapılamadı: {type(exc).__name__}: {exc}"
         save()
+        continue
     entry["outputs_equal"] = outcomes_equal(outcomes["old"], outcomes["new"])
     if not outcomes["old"]["ok"] or not outcomes["new"]["ok"]:
         entry["error"] = "Benchmark çağrısı hata verdi: eski=" + describe(outcomes["old"]) + \
@@ -535,6 +600,21 @@ def early_return_lines(source: str) -> dict[str, list[int]]:
     return result
 
 
+# Bu süreden kısa ölçümler zamanlayıcı ve çağrı maliyeti gürültüsünden ayırt edilemez; hızlanma
+# oranı bu sürelere bölünürse anlamsız büyür (ör. 0,3 µs -> 25.000×).
+MIN_RELIABLE_SECONDS = 1e-6
+
+
+def _speedup(old: float | None, new: float | None) -> tuple[float | None, bool]:
+    """(hızlanma, alt_sınır_mı). Yeni süre 1 µs'nin altındaysa 1 µs kabul edilir ve sonuç bir alt
+    sınırdır; iki süre de 1 µs'nin altındaysa oran anlamsızdır (None). Sıfıra bölünmez."""
+    if old is None or new is None or old < MIN_RELIABLE_SECONDS:
+        return None, False
+    if new < MIN_RELIABLE_SECONDS:
+        return old / MIN_RELIABLE_SECONDS, True
+    return old / new, False
+
+
 def _summarize_benchmark(entries: list[dict]) -> dict | None:
     if not entries:
         return None
@@ -546,8 +626,9 @@ def _summarize_benchmark(entries: list[dict]) -> dict | None:
     ]
     old = sum(e["old_seconds"] for e in measured) if measured else None
     new = sum(e["new_seconds"] for e in measured) if measured else None
-    speedup = old / new if measured and new else None
-    return {"old_seconds": old, "new_seconds": new, "speedup": speedup, "functions": entries}
+    speedup, lower_bound = _speedup(old, new)
+    return {"old_seconds": old, "new_seconds": new, "speedup": speedup,
+            "speedup_is_lower_bound": lower_bound, "functions": entries}
 
 
 def verify(
@@ -558,6 +639,7 @@ def verify(
     *,
     timeout: float = DEFAULT_TIMEOUT,
     memory_mb: int = DEFAULT_MEMORY_MB,
+    measure: bool = True,
 ) -> dict:
     """Eski ve yeni kodu karşılaştırır.
 
@@ -566,14 +648,19 @@ def verify(
           "passed": bool,
           "cases": [{"function", "input", "old", "new", "equal", "old_ok",
                      ["derived"], ["invalid"], ["note"],
+                     ["side_effect": [{"name", "before", "old", "new"}]],
                      ["minimal": {"input", "old", "new"}]}, ...],
-          "benchmark": None | {"old_seconds", "new_seconds", "speedup",
+          "benchmark": None | {"old_seconds", "new_seconds", "speedup", "speedup_is_lower_bound",
                                "functions": [{"function", "old_seconds", "new_seconds",
                                               "outputs_equal", "error", "auto",
                                               "worst_case", "note"}, ...]},
           "timed_out": bool,
           "error": None | str,
         }
+
+    Süreler: her tekrardan önce kod temiz bir modülde yeniden yüklenir (önbellek/global durum
+    taşınmaz), 3 tekrarın en iyisi alınır. Yeni süre 1 µs'nin altındaysa hızlanma 1 µs'ye göre
+    hesaplanan bir alt sınırdır (speedup_is_lower_bound=True); eski süre de 1 µs altındaysa None.
 
     worst_case: döngü içinde erken dönen fonksiyonlarda ölçüm girdisinin erken dönüşe yol
     açmadığı (True) / açtığı (False) doğrulandı; diğer fonksiyonlarda None. LLM'in girdisi
@@ -585,6 +672,7 @@ def verify(
         "test_inputs": test_inputs or {},
         "benchmark_input": benchmark_input or {},
         "early_returns": early_return_lines(original_code),
+        "skip_benchmark": not measure,  # yalnızca eşdeğerlik (ör. desen örneği kaydı)
         "timeout": timeout,
         "memory_mb": memory_mb,
     }
@@ -623,6 +711,15 @@ def verify(
     if cases_ok and not any(c.get("old_ok") for c in cases):
         cases_ok = False
         error = error or "Hiçbir test girdisi orijinal kodda hatasız çalışmadı; eşdeğerlik testi anlamlı değil."
+    failing = [c for c in cases if not c.get("equal")]
+    if failing and error is None and all(c.get("side_effect") is not None for c in failing):
+        first = failing[0]["side_effect"][0] if failing[0]["side_effect"] else None
+        error = "Yan etki farkı: dönüş değerleri orijinalle aynı, ancak yeni kod argümanları farklı değiştiriyor"
+        if first:
+            error += (f" (ör. `{first['name']}` = {first['before']} için çağrı sonrası orijinalde "
+                      f"{first['old']}, yeni kodda {first['new']}).")
+        else:
+            error += "."
     bench_ok = benchmark is None or all(
         e["outputs_equal"] is not False for e in benchmark["functions"]
     )

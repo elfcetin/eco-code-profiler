@@ -7,17 +7,19 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON, Boolean, DateTime, Engine, Float, Integer, String, Text, TypeDecorator, create_engine, inspect, select,
-    text, true,
+    text, true, update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from . import config
-from .patterns import GREEN_PATTERNS
+from .patterns import EXAMPLE_INPUTS, GREEN_PATTERNS
 
 # PostgreSQL'de JSONB, diğerlerinde (SQLite) genel JSON tipi.
 JSONType = JSON().with_variant(JSONB(), "postgresql")
+# None -> SQL NULL (JSON 'null' değil); "girdi tanımlı değil" sorgulanabilsin.
+NullableJSON = JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql")
 
 
 class Base(DeclarativeBase):
@@ -70,6 +72,8 @@ class GreenPattern(Base):
     example_before: Mapped[str] = mapped_column(Text)
     example_after: Mapped[str] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
+    # Örneklerin eşdeğerlik kontrolü için test girdileri: {fonksiyon: [[argümanlar], ...]}
+    example_inputs: Mapped[dict | None] = mapped_column(NullableJSON, nullable=True)
     updated_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime(), default=_utcnow, onupdate=_utcnow
     )
@@ -92,6 +96,7 @@ class GreenPattern(Base):
             **self.to_dict(),
             "is_active": self.is_active,
             "updated_at": iso_utc(self.updated_at),
+            "example_inputs": self.example_inputs,
         }
 
 
@@ -138,7 +143,15 @@ def seed_patterns(session: Session) -> int:
     """
     existing = set(session.scalars(select(GreenPattern.code)))
     missing = [data for data in GREEN_PATTERNS if data["code"] not in existing]
-    session.add_all(GreenPattern(**data) for data in missing)
+    session.add_all(GreenPattern(**data, example_inputs=EXAMPLE_INPUTS.get(data["code"])) for data in missing)
+    # Test girdisi olmayan mevcut kayıtlara (eski sürümden gelen) varsayılan girdiler; tanımlı
+    # girdilere dokunulmaz ve updated_at değişmez.
+    for code, inputs in EXAMPLE_INPUTS.items():
+        session.execute(
+            update(GreenPattern)
+            .where(GreenPattern.code == code, GreenPattern.example_inputs.is_(None))
+            .values(example_inputs=inputs, updated_at=GreenPattern.updated_at)
+        )
     session.commit()
     return len(missing)
 
@@ -157,6 +170,8 @@ def _add_missing_columns(bind: Engine) -> None:
         statements.append(f"ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {true}")
     if "updated_at" not in columns:
         statements.append(f"ADD COLUMN updated_at {table.c.updated_at.type.compile(dialect=bind.dialect)}")
+    if "example_inputs" not in columns:
+        statements.append(f"ADD COLUMN example_inputs {table.c.example_inputs.type.compile(dialect=bind.dialect)}")
     if statements:
         with bind.begin() as conn:
             for stmt in statements:  # SQLite tek ALTER'da tek sütun kabul eder

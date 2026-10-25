@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import DiffView from '../components/DiffView.jsx'
 import ResultView from '../components/ResultView.jsx'
+import { EquivalenceTable } from '../components/ResultCards.jsx'
 
 afterEach(cleanup)
 
@@ -97,5 +98,24 @@ describe('ResultView (Geçmişten yükleme)', () => {
     render(<ResultView result={historyResult('optimized')} onSelectLine={() => {}} />)
     expect(copyButton()).not.toBeNull()
     expect(notRecommended()).toBeNull()
+  })
+})
+
+describe('Eşdeğerlik tablosu: yan etki farkı', () => {
+  it('argümanın çağrı sonrası halini eski/yeni olarak gösterir', () => {
+    const verification = {
+      passed: false,
+      error: 'Yan etki farkı: dönüş değerleri orijinalle aynı, ancak yeni kod argümanları farklı değiştiriyor (ör. `tasks` = [1, 2, 3] için çağrı sonrası orijinalde [], yeni kodda [1, 2, 3]).',
+      cases: [{
+        function: 'process_queue', input: '[[1, 2, 3]]', old: '[2, 4, 6]', new: '[2, 4, 6]', equal: false,
+        note: 'Yan etki farkı: dönüş değerleri aynı, ama `tasks` çağrıdan sonra orijinal koddakinden farklı kalıyor.',
+        side_effect: [{ name: 'tasks', before: '[1, 2, 3]', old: '[]', new: '[1, 2, 3]' }],
+      }],
+    }
+    render(<EquivalenceTable verification={verification} />)
+    expect(screen.getByText(/^Yan etki farkı: dönüş değerleri orijinalle aynı/)).toBeTruthy()
+    const row = screen.getByText(/çağrıdan sonra: eski kodda/).closest('tr')
+    expect(row.textContent).toContain('tasks çağrıdan sonra: eski kodda [], yeni kodda [1, 2, 3]')
+    expect(row.querySelector('[aria-label="yan etki farkı"]').textContent).toContain('yan etki')
   })
 })

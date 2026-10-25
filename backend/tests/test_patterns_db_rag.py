@@ -7,8 +7,9 @@ from sqlalchemy.pool import StaticPool
 
 from app.analyzer import analyze
 from app.db import AnalysisRun, GreenPattern, init_db, load_catalog
-from app.patterns import GREEN_PATTERNS, PATTERNS_BY_CODE
+from app.patterns import EXAMPLE_INPUTS, GREEN_PATTERNS, PATTERNS_BY_CODE
 from app.rag import retrieve
+from app.verifier import verify
 
 EXPECTED_CODES = [f"YK-{i:02d}" for i in range(1, 11)]
 FIELDS = {"code", "title", "anti_pattern", "solution", "impact", "example_before", "example_after"}
@@ -54,6 +55,23 @@ def test_analyzer_flags_before_but_not_after(pattern):
     after = {f["pattern_code"] for f in analyze(pattern["example_after"])["findings"]}
     assert code in before
     assert code not in after
+
+
+def test_example_inputs_cover_all_patterns():
+    assert sorted(EXAMPLE_INPUTS) == EXPECTED_CODES
+
+
+@pytest.mark.parametrize("pattern", GREEN_PATTERNS, ids=lambda p: p["code"])
+def test_examples_are_equivalent(pattern):
+    """'Sonra' örneği 'önce' ile aynı davranmalı (dönüş değeri, hata tipi ve argüman yan etkileri).
+
+    Modeller onaylı örnekleri birebir kopyalar; eşdeğer olmayan bir örnek LLM'i sistematik olarak
+    yanlış koda yönlendirir (ör. YK-07 örneği girdi listesini boşaltmıyordu, YK-01 örneği set
+    kullandığı için tekrarları kaybediyordu).
+    """
+    result = verify(pattern["example_before"], pattern["example_after"], EXAMPLE_INPUTS[pattern["code"]])
+    failing = [c for c in result["cases"] if not c["equal"]]
+    assert result["passed"], f"{pattern['code']}: {result['error']} {failing[:2]}"
 
 
 # --------------------------------------------------------------------------- #
@@ -123,10 +141,11 @@ def test_init_db_migrates_old_table_without_data_loss():
     init_db(eng)  # ikinci açılış: sütunlar zaten var, hata vermemeli
 
     columns = {c["name"] for c in inspect(eng).get_columns("green_patterns")}
-    assert {"is_active", "updated_at"} <= columns
+    assert {"is_active", "updated_at", "example_inputs"} <= columns
     with Session(eng) as s:
         row = s.get(GreenPattern, "YK-01")
         assert (row.solution, row.impact, row.is_active, row.updated_at) == ("kurum çözümü", "orta", True, None)
+        assert row.example_inputs == EXAMPLE_INPUTS["YK-01"]  # eski kayda varsayılan test girdileri
         assert s.scalar(select(func.count()).select_from(GreenPattern)) == 10  # eksikler eklendi
     eng.dispose()
 
@@ -217,3 +236,23 @@ def test_retrieve_skips_inactive(session):
     session.get(GreenPattern, "YK-02").is_active = False
     session.commit()
     assert [r["code"] for r in retrieve(["YK-01", "YK-02"], session=session)] == ["YK-01"]
+
+
+def test_seeded_patterns_have_example_inputs(session):
+    rows = session.scalars(select(GreenPattern)).all()
+    assert {r.code: r.example_inputs for r in rows} == EXAMPLE_INPUTS
+
+
+def test_backfill_keeps_custom_inputs_and_updated_at(engine, session):
+    custom = {"common": [[[9], [9]]]}
+    session.get(GreenPattern, "YK-01").example_inputs = custom
+    session.get(GreenPattern, "YK-02").example_inputs = None
+    session.commit()
+    stamp = session.get(GreenPattern, "YK-02").updated_at
+
+    init_db(engine)  # yeniden başlatma
+    session.expire_all()
+
+    assert session.get(GreenPattern, "YK-01").example_inputs == custom      # kurumun girdisine dokunulmadı
+    assert session.get(GreenPattern, "YK-02").example_inputs == EXAMPLE_INPUTS["YK-02"]  # boş olan dolduruldu
+    assert session.get(GreenPattern, "YK-02").updated_at == stamp          # düzenleme sayılmadı

@@ -395,6 +395,14 @@ button {
   background: var(--danger-soft);
 }
 
+.fail-text {
+  color: var(--danger);
+}
+
+.equivalence .nowrap {
+  white-space: nowrap;
+}
+
 .error-text {
   color: var(--danger);
   margin: 4px 0 0;
@@ -1277,7 +1285,8 @@ button {
   min-width: 0;
 }
 
-.field > span {
+.field > span,
+.field > label {
   font-size: 12px;
   font-weight: 600;
   color: var(--muted);

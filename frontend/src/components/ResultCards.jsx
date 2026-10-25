@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
+import Field from './Field.jsx'
 import { IMPACT_CLASS, energyAssumptionNote, formatEstimate, formatSeconds, formatSpeedup } from '../format.js'
 
 export function ImpactBadge({ impact }) {
@@ -138,14 +139,12 @@ export function EnergyEstimate({ initial, oldSeconds, newSeconds }) {
         <p className="muted small">Çalıştırma başına ≈ {formatEstimate(estimate.joules_per_run)} J</p>
       )}
       <div className="energy-inputs">
-        <label className="field field-inline">
-          <span>İşlemci gücü (W)</span>
+        <Field label="İşlemci gücü (W)" inline>
           <input type="number" min="1" step="1" value={watts} onChange={(e) => setWatts(e.target.value)} />
-        </label>
-        <label className="field field-inline">
-          <span>Günde çalışma sayısı</span>
+        </Field>
+        <Field label="Günde çalışma sayısı" inline>
           <input type="number" min="1" step="1000" value={runs} onChange={(e) => setRuns(e.target.value)} />
-        </label>
+        </Field>
       </div>
       {error && <p className="error-text">{error}</p>}
       <p className="footnote">{valid ? energyAssumptionNote(w, r) : 'Gerçek tüketim donanıma ve kullanıma bağlıdır.'}</p>
@@ -167,18 +166,29 @@ export function BenchmarkCard({ benchmark, energy }) {
       </section>
     )
   }
-  const { old_seconds: oldS, new_seconds: newS, speedup } = benchmark
+  const { old_seconds: oldS, new_seconds: newS, speedup, speedup_is_lower_bound: lowerBound } = benchmark
   const max = Math.max(oldS, newS) || 1
   const faster = speedup >= 1
   return (
     <section className="card">
       <h3>Ölçülen süre</h3>
-      <div className="speedup">
-        <span className={faster ? 'speedup-value' : 'speedup-value slower'}>
-          {formatSpeedup(faster ? speedup : 1 / speedup)}
-        </span>
-        <span className="speedup-label">{faster ? 'kat hızlı' : 'kat yavaş'}</span>
-      </div>
+      {speedup == null ? (
+        <p className="muted">Süreler 1 µs'nin altında; hızlanma oranı güvenilir biçimde hesaplanamadı.</p>
+      ) : (
+        <div className="speedup">
+          <span className={faster ? 'speedup-value' : 'speedup-value slower'}>
+            {lowerBound && '≥ '}
+            {formatSpeedup(faster ? speedup : 1 / speedup)}
+          </span>
+          <span className="speedup-label">{faster ? 'kat hızlı' : 'kat yavaş'}</span>
+        </div>
+      )}
+      {lowerBound && (
+        <p className="footnote warn-text">
+          Yeşil Kod süresi 1 µs'nin altında, ölçüm çözünürlüğüne yakın. Hızlanma 1 µs'ye göre hesaplanan bir alt
+          sınırdır.
+        </p>
+      )}
       <div className="bars">
         {[
           ['Eski kod', oldS, 'bar-old'],
@@ -198,14 +208,16 @@ export function BenchmarkCard({ benchmark, energy }) {
           {benchmark.functions.filter((f) => f.error).map((f) => `${f.function}: ${f.error}`).join(' · ')}
         </p>
       )}
-      {benchmark.functions?.some((f) => f.auto && f.worst_case == null) && (
+      {benchmark.functions?.some((f) => f.auto && f.worst_case == null && !f.note) && (
         <p className="footnote warn-text">
           Ölçüm girdisi sistem tarafından örnek girdilerden otomatik üretildi; en kötü durumu temsil
           etmeyebilir.
         </p>
       )}
       {benchmark.functions?.filter((f) => f.note).map((f) => (
-        <p className="footnote" key={`note-${f.function}`}>{f.function}: {f.note}</p>
+        <p className={`footnote${f.worst_case == null ? ' warn-text' : ''}`} key={`note-${f.function}`}>
+          {f.function}: {f.note}
+        </p>
       ))}
       {benchmark.functions?.filter((f) => f.worst_case === false).map((f) => (
         <p className="footnote warn-text" key={`worst-${f.function}`}>
@@ -215,7 +227,7 @@ export function BenchmarkCard({ benchmark, energy }) {
       ))}
       <p className="footnote">
         <strong>Gerçek ölçüm (süre):</strong> iki sürüm aynı rastgele girdiyle yalıtılmış bir süreçte
-        çalıştırıldı (timeit, 3 tekrarın en iyisi). Ölçüm, mümkün olduğunda en kötü durum girdisiyle yapılır.
+        çalıştırıldı (timeit, 3 tekrarın en iyisi; her tekrar önbelleği boş, temiz yüklenmiş kodla başlar). Ölçüm, mümkün olduğunda en kötü durum girdisiyle yapılır.
         Sonuç sunucu donanımına bağlıdır. Enerji ölçülmez; aşağıdaki
         kWh değeri bu süre farkından varsayımlarla hesaplanan bir tahmindir.
       </p>
@@ -254,7 +266,13 @@ export function EquivalenceTable({ verification }) {
                   <td><code>{c.old ?? '—'}</code></td>
                   <td>
                     <code>{c.new ?? '—'}</code>
-                    {c.note && <div className="finding-detail">{c.note}</div>}
+                    {c.note && <div className={c.side_effect ? 'finding-detail fail-text' : 'finding-detail'}>{c.note}</div>}
+                    {c.side_effect?.map((change) => (
+                      <div className="finding-detail" key={change.name}>
+                        <code>{change.name}</code> çağrıdan sonra: eski kodda <code>{change.old}</code>, yeni kodda{' '}
+                        <code>{change.new}</code>
+                      </div>
+                    ))}
                     {c.minimal && (
                       <div className="finding-detail">
                         En küçük karşı örnek: <code>{c.function}(*{c.minimal.input})</code> → eski{' '}
@@ -262,7 +280,10 @@ export function EquivalenceTable({ verification }) {
                       </div>
                     )}
                   </td>
-                  <td className="center" aria-label={c.equal ? 'eşit' : 'farklı'}>{c.equal ? '✅' : '❌'}</td>
+                  <td className="center" aria-label={c.equal ? 'eşit' : c.side_effect ? 'yan etki farkı' : 'farklı'}>
+                    {c.equal ? '✅' : '❌'}
+                    {c.side_effect && <div className="finding-detail fail-text nowrap">yan etki</div>}
+                  </td>
                 </tr>
               ))}
             </tbody>

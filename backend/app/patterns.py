@@ -26,7 +26,9 @@ GREEN_PATTERNS: list[dict[str, str]] = [
         ),
         "solution": (
             "Aranan tarafı bir kez set/dict'e dönüştürün ve tek geçişte O(1) arama yapın; "
-            "gruplama gerekiyorsa dict ile anahtar bazında toplayın. Toplam süre O(N) olur."
+            "gruplama gerekiyorsa dict ile anahtar bazında toplayın. Toplam süre O(N) olur. "
+            "İç döngü her eşleşmede bir sonuç üretiyorsa (tekrarlar önemliyse) set yerine "
+            "`collections.Counter` ile eşleşme sayısını koruyun."
         ),
         "example_before": (
             "def common(a, b):\n"
@@ -38,9 +40,14 @@ GREEN_PATTERNS: list[dict[str, str]] = [
             "    return result\n"
         ),
         "example_after": (
+            "from collections import Counter\n"
+            "\n"
             "def common(a, b):\n"
-            "    b_set = set(b)\n"
-            "    return [x for x in a if x in b_set]\n"
+            "    counts = Counter(b)  # her değerin b'de kaç kez geçtiği\n"
+            "    result = []\n"
+            "    for x in a:\n"
+            "        result.extend([x] * counts[x])  # orijinal gibi her eşleşme için bir kez\n"
+            "    return result\n"
         ),
     },
     {
@@ -193,7 +200,9 @@ GREEN_PATTERNS: list[dict[str, str]] = [
         ),
         "solution": (
             "Kuyruk veya çift uçlu kullanım için `collections.deque` ve O(1) çalışan "
-            "`popleft()` / `appendleft()` metotlarını kullanın."
+            "`popleft()` / `appendleft()` metotlarını kullanın. Orijinal kod girdi listesini "
+            "boşaltıyorsa (yan etki), deque'ya kopyaladıktan sonra `liste.clear()` ile aynı "
+            "davranışı koruyun."
         ),
         "example_before": (
             "def drain(tasks):\n"
@@ -207,6 +216,7 @@ GREEN_PATTERNS: list[dict[str, str]] = [
             "\n"
             "def drain(tasks):\n"
             "    queue = deque(tasks)\n"
+            "    tasks.clear()  # orijinal gibi girdi listesini boşalt (yan etkiyi koru)\n"
             "    done = []\n"
             "    while queue:\n"
             "        done.append(queue.popleft())\n"
@@ -222,8 +232,11 @@ GREEN_PATTERNS: list[dict[str, str]] = [
             "olduğundan toplam maliyet O(N² log N)'e çıkar."
         ),
         "solution": (
-            "Sıralamayı döngüden önce/sonra bir kez yapın. Her adımda en küçük/en büyük "
-            "eleman gerekiyorsa `heapq`, sıralı ekleme gerekiyorsa `bisect.insort` kullanın."
+            "Sıralı veri yalnızca döngü bittikten sonra gerekiyorsa (ör. en büyük k eleman) "
+            "sıralamayı döngüden sonra bir kez yapın. Her adımda yalnızca en küçük/en büyük "
+            "eleman gerekiyorsa `heapq`, her adımda tüm sıralı liste gerekiyorsa `bisect.insort` "
+            "kullanın. Heap sıralı DEĞİLDİR (yalnızca heap[0] en küçüktür); sıralı sonuç "
+            "döndürülecekse `sorted(...)` kullanın."
         ),
         "example_before": (
             "def running_min(stream):\n"
@@ -233,6 +246,14 @@ GREEN_PATTERNS: list[dict[str, str]] = [
             "        seen.sort()\n"
             "        out.append(seen[0])\n"
             "    return out\n"
+            "\n"
+            "\n"
+            "def top_three(values):\n"
+            "    best = []\n"
+            "    for v in values:\n"
+            "        best.append(v)\n"
+            "        best.sort()\n"
+            "    return best[-3:]\n"
         ),
         "example_after": (
             "import heapq\n"
@@ -241,8 +262,13 @@ GREEN_PATTERNS: list[dict[str, str]] = [
             "    heap, out = [], []\n"
             "    for x in stream:\n"
             "        heapq.heappush(heap, x)\n"
-            "        out.append(heap[0])\n"
+            "        out.append(heap[0])  # her adımda yalnızca en küçük gerekiyor: heap\n"
             "    return out\n"
+            "\n"
+            "\n"
+            "def top_three(values):\n"
+            "    # Sıralı veri yalnızca sonda gerekiyor: döngüde değil, bir kez sırala.\n"
+            "    return sorted(values)[-3:]\n"
         ),
     },
     {
@@ -294,3 +320,23 @@ GREEN_PATTERNS: list[dict[str, str]] = [
 ]
 
 PATTERNS_BY_CODE: dict[str, dict[str, str]] = {p["code"]: p for p in GREEN_PATTERNS}
+
+# Örneklerin eşdeğerlik kontrolü için başlangıç test girdileri: desen kodu -> {fonksiyon: [[argümanlar], ...]}.
+# Tekrarlar, boş/tek eleman ve kenar durumlar içerir; doğrulayıcı ayrıca sıralı/ters/rastgele girdiler türetir.
+# Veritabanında `example_inputs` olarak saklanır ve Desenler ekranından düzenlenebilir.
+EXAMPLE_INPUTS: dict[str, dict[str, list]] = {
+    "YK-01": {"common": [[[1, 2, 3], [2, 3, 4]], [[1, 1, 2], [1, 1, 5]], [[], [1]], [[3, 1, 3], [3]], [["a", "b"], ["b", "b"]]]},
+    "YK-02": {"unique": [[[3, 1, 3, 2, 1]], [[]], [[7]], [["b", "a", "b"]]]},
+    "YK-03": {"render": [[[1, 2, 3]], [[]], [["a"]], [[0, -1, 2]]]},
+    "YK-04": {"label": [[["a", "b", "c"]], [[]], [[1]], [[5, 5]]]},
+    "YK-05": {"find_pair": [[[1, 2, 3, 4], 5], [[3, 3, 4], 6], [[], 1], [[5], 10], [[1, 4, 2, 3, 2], 5]]},
+    "YK-06": {"fib": [[0], [1], [2], [10], [15]]},
+    "YK-07": {"drain": [[[1, 2, 3]], [[]], [[5]], [[4, 4, 1]]]},
+    "YK-08": {
+        "running_min": [[[5, 3, 8, 1, 4]], [[]], [[2]], [[3, 3, 1, 1]]],
+        "top_three": [[[50, 90, 70, 80]], [[]], [[5]], [[3, 3, 1]], [[1, 2]]],
+    },
+    "YK-09": {"has_negative": [[[1, -2, 3]], [[]], [[0, 1]], [[-1]]]},
+    "YK-10": {"count_numbers": [[["a1", "b", "22c"]], [[]], [["x"]], [["7", "8", "9"]]]},
+}
+

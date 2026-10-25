@@ -73,6 +73,11 @@ LLM çıktısına güvenilmez; her yeniden yazım önce süzülür, sonra yalıt
 | Test girdisine beklenen çıktı eklenmiş (`[girdi, beklenen]`) | Fazladan eleman atılır |
 | Test girdisi imzaya uymuyor | Atlanır; hiçbiri uymuyorsa reddedilir |
 
+**1b. Desen giderildi mi?** (`main.py`) Değişmemiş kod kendisiyle doğal olarak eşdeğer olduğu için eşdeğerlik testinden geçer. Bu kontrol olmasaydı "optimize edildi" sayılırdı (gerçek örnek: `top_scores` için model bir denemede orijinal kodu aynen döndürdü). Bu yüzden yeni kod eşdeğerlik testinden önce yeniden analiz edilir:
+- Kod normalize edilmiş hâliyle orijinalle aynıysa, ya da orijinalde bulunan desenlerin **hiçbirinin** bulgu sayısı azalmamışsa, deneme başarısız sayılır. Bu durumda doğrulayıcı çalıştırılmaz.
+- Hangi desenin hangi satırda kaldığı LLM'e geri bildirim olarak gönderilir ve bir kez daha denenir.
+- Kısmi ilerleme (ör. YK-01 ve YK-02'den yalnızca YK-02'nin giderilmesi) kabul edilir ve eşdeğerlik testine geçer.
+
 **2. Eşdeğerlik testi** (`verifier.py`). Her fonksiyon şu girdilerle hem eski hem yeni kodda, `deepcopy`'lenmiş argümanlarla çağrılır:
 
 - LLM'in ürettiği test girdileri (en az 4),
@@ -82,7 +87,10 @@ Sonuçlar **tür dahil** karşılaştırılır (`1` ile `1.0` farklıdır). Ayn�
 
 Türetilmiş girdiler önemlidir. Gerçek denemelerde LLM'in seçtiği küçük girdilerde tesadüfen doğru çıkan sıra hataları (ör. `list(set(...))`) yalnızca bunlarla yakalandı.
 
-**3. Ölçüm.** LLM'in verdiği benchmark ifadesi (~5000 eleman) aynı rastgele tohumla üretilir ve her iki sürüm `timeit` ile ölçülür (3 tekrarın en iyisi). LLM ifade vermezse örnek girdiden 2000 elemanlı **otomatik girdi** üretilir; bu girdi en kötü durumu temsil etmeyebilir ve arayüzde öyle belirtilir.
+**3. Ölçüm.** LLM'in verdiği benchmark ifadesi (~5000 eleman) aynı rastgele tohumla üretilir ve her iki sürüm `timeit` ile ölçülür (3 tekrarın en iyisi).
+
+- **Her tekrar temiz başlar.** Her tekrardan önce kod temiz bir modülde yeniden `exec` edilir; bu süre ölçüme dahil değildir. Böylece `@lru_cache`/`@cache`, modül düzeyindeki memo sözlükleri ve diğer global durum tekrarlar arasında taşınmaz. Bu kural eski ve yeni kod için aynıdır. Önceden 2. ve 3. tekrar önbellekten anında dönüyordu ve "en iyi" süre sahte çıkıyordu (`fib` için 0,3 µs ve 25.430×; doğrusu ~4 µs ve ~1.800×). `cache_clear()` yerine yeniden yükleme seçildi, çünkü `cache_clear()` elle yazılmış memo sözlüklerini ve global durumu temizlemez.
+- **Çok kısa süreler.** 1 µs altındaki süreler zamanlayıcı ve çağrı maliyeti gürültüsünden ayırt edilemez. Yeni süre 1 µs'nin altındaysa hızlanma 1 µs'ye göre hesaplanır ve arayüzde **alt sınır** olarak gösterilir (`≥ N×`, `speedup_is_lower_bound`). İki süre de 1 µs'nin altındaysa oran verilmez. Arayüz 1 µs altındaki süreleri nanosaniye ile gösterir. LLM ifade vermezse örnek girdiden 2000 elemanlı **otomatik girdi** üretilir; bu girdi en kötü durumu temsil etmeyebilir ve arayüzde öyle belirtilir. Büyütülebilir bir sayı/metin listesi yoksa (ör. `fib(n)` gibi yalnızca tamsayı alan fonksiyonlar), orijinal kodun hatasız çalıştığı **en büyük test girdisiyle** ölçülür. Büyüklük, sayıların mutlak değerleri ile liste/metin uzunluklarının toplamıdır. Bu girdi küçük olabileceği için arayüzde belirtilir.
 
 **En kötü durum girdisi.** Bir şey arayıp bulunca erken dönen fonksiyonlarda (döngü içinde `return`, AST ile bulunur) ölçüm, eşleşme hemen bulunursa gerçek farkı gizler. Örneğin `find_pair` için çifti hemen bulan bir girdi 1,5× gösterirken eşleşmesiz girdi ~270× gösterir. Bu yüzden:
 - LLM'den bu fonksiyonlarda eşleşmenin hiç bulunmadığı ya da en sonda bulunduğu bir girdi üretmesi istenir (ör. two-sum için ulaşılamayan hedef).
@@ -91,7 +99,7 @@ Türetilmiş girdiler önemlidir. Gerçek denemelerde LLM'in seçtiği küçük 
 
 Benchmark girdisinde de sonuçlar karşılaştırılır. Hata veren ya da farklı sonuç üreten ölçümler hızlanma hesabına katılmaz.
 
-**4. Geri bildirim.** Doğrulama başarısız olursa, uyuşmayan girdi farkı koruyarak **en küçük karşı örneğe** indirilir (ör. 40 elemanlı liste → `[1, 2, 2, 1]`: beklenen `[1, 2]`, üretilen `[2, 1]`). Sonuçların yalnızca sırası farklıysa LLM'e "set'in sırası tanımsızdır; dict/Counter kullan" ipucu eklenir. Bu geri bildirimle bir kez daha denenir. Karşı örnek arayüzdeki eşdeğerlik tablosunda da gösterilir.
+**4. Geri bildirim.** Doğrulama başarısız olursa, uyuşmayan girdi farkı koruyarak **en küçük karşı örneğe** indirilir (ör. 40 elemanlı liste → `[1, 2, 2, 1]`: beklenen `[1, 2]`, üretilen `[2, 1]`). Sonuçların yalnızca sırası farklıysa, önerilen koda göre bir ipucu eklenir: kodda `set` varsa "set'in sırası tanımsızdır; dict/Counter kullan", `heapq` varsa "heap sıralı değildir; sonucu `sorted()` ile döndür", orijinal sonuç artan sıradaysa bu da belirtilir. Sabit bir "set" ipucu, kodda set yokken (ör. heap) modeli yanlış yöne itiyordu. Yeni sonuç orijinalle aynı elemanları içeriyor ama bazılarının **tekrar sayısı eksikse** (yeni sonucun eleman sayımı orijinalinkinin alt kümesiyse) "orijinal her eşleşme için eleman ekliyor; var/yok kontrolü tekrarları kaybeder, `Counter` ile sayısı kadar ekle" ipucu en küçük karşı örnekle birlikte eklenir. Bu ipucu olmadan model `find_common_users` gibi kodlarda `[x for x in a if counts[x]]` yazıp her denemede kalıyordu. Argümanlar farklı değiştiriliyorsa (yan etki) argümanın çağrı sonrası eski/yeni hâli bildirilir. Bu geri bildirimle bir kez daha denenir. Karşı örnek arayüzdeki eşdeğerlik tablosunda da gösterilir.
 
 ### Klasör yapısı
 
@@ -121,13 +129,13 @@ Benchmark girdisinde de sonuçlar karşılaştırılır. Hata veren ya da farkl�
 
 | Kod   | Tespit edilen sorun                              | Çözüm                                   | Varsayılan etki |
 |-------|--------------------------------------------------|-----------------------------------------|-----------------|
-| YK-01 | İç içe döngü                                     | set/dict ile tek geçiş                  | yüksek |
+| YK-01 | İç içe döngü                                     | set/dict/`Counter` ile tek geçiş        | yüksek |
 | YK-02 | Döngüde listede `in` / `not in`                  | `set` ile üyelik kontrolü               | yüksek |
 | YK-03 | Döngüde string `+=`                              | `"".join(...)`                          | düşük  |
 | YK-04 | Döngüde değişmeyen `len(x)`                      | Döngü dışına al                         | düşük  |
 | YK-05 | İç içe döngüyle two-sum (`a + b == hedef`)       | Hash map (+ sıra için `bisect`)         | yüksek |
 | YK-06 | Önbelleksiz çoklu özyineleme                     | `functools.lru_cache` veya iteratif     | yüksek |
-| YK-07 | Döngüde `pop(0)` / `insert(0, …)`                | `collections.deque`                     | yüksek |
+| YK-07 | Döngüde `pop(0)` / `insert(0, …)`                | `collections.deque` (+ yan etkiyi koru) | yüksek |
 | YK-08 | Döngüde `.sort()` / `sorted()`                   | Bir kez sırala veya `heapq`             | yüksek |
 | YK-09 | `sum/any/all/min/max([...])`                     | Generator ifadesi                       | düşük  |
 | YK-10 | Döngüde `re.compile()` / `open()`                | Döngü dışına al                         | orta   |
@@ -140,9 +148,17 @@ Desenlerin tam metni ve önce/sonra örnekleri arayüzdeki **Yeşil Kod Desenler
 - Her desen **aktif/pasif** yapılabilir (`PATCH /api/patterns/{code}/active`). Pasif desenler analizde raporlanmaz ve RAG ile LLM'e gönderilmez. Kodda yalnızca pasif desenler bulunursa sonuç "israf tespit edilmedi" olur ve LLM çağrılmaz. Karmaşıklık tahmini yine gösterilir.
 - Analizci desen başlığını, etki düzeyini ve aktif/pasif durumunu veritabanından alır. Tespit kuralları ise kodda (`analyzer.py`) olduğundan arayüzden **yeni desen eklenemez**; yeni bir desen türü için tespit kuralı yazılması gerekir.
 - `patterns.py` dosyasında yapılan bir değişiklik mevcut kurulumlara **yansımaz** (yalnızca yeni kurulumlarda veya tabloda eksik olan desenlerde kullanılır). Mevcut bir kurulumda güncellemek için arayüzü kullanın.
-- Eski sürümle oluşturulmuş bir veritabanında `is_active` ve `updated_at` sütunları açılışta otomatik eklenir. Mevcut desenler aktif kalır, veri kaybolmaz.
+- **Örnek eşdeğerliği:** Önce/sonra örnekleri ya da test girdileri değiştirildiğinde, kaydetmeden önce iki örnek doğrulayıcıdan geçirilir. Karşılaştırılanlar dönüş değeri, hata tipi ve argüman yan etkileridir; süre ölçülmez. Eşdeğer değilse kayıt reddedilir (**400**) ve ilk farklı durum gösterilir. Yalnızca sorun/çözüm metni ya da etki düzeyi değişiyorsa kontrol çalışmaz.
+- **Test girdileri:** Her desenin test girdileri `example_inputs` alanında (`{"fonksiyon_adı": [[argümanlar], ...]}`) saklanır ve düzenleme formundan değiştirilebilir. Örnekteki fonksiyon değiştirilirse girdiler de ona göre güncellenmelidir. Başlangıç değerleri `patterns.py` içindeki `EXAMPLE_INPUTS`'tur.
+- **Eski veritabanları:** Eski sürümle oluşturulmuş bir veritabanında `is_active`, `updated_at` ve `example_inputs` sütunları açılışta otomatik eklenir. Mevcut desenler aktif kalır, veri kaybolmaz. Test girdisi olmayan desenlere varsayılan girdiler yazılır; tanımlı girdilere ve `updated_at`'e dokunulmaz.
 
-> Örnekler önemlidir: modeller desen örneklerini sık sık birebir kopyalar. YK-05'in ilk sürümündeki örnek, birden fazla çift olduğunda orijinalden farklı bir çift döndürüyordu; eşdeğerlik testi bunu yakaladı ve örnek, sırayı koruyan sürümle değiştirildi. Bir desenin örneğini düzenlerken "sonra" örneğinin "önce" ile aynı sonucu verdiğinden emin olun.
+> **Örnekler önemlidir:** modeller desen örneklerini sık sık birebir kopyalar. Eşdeğer olmayan bir örnek, LLM'i geri bildirime rağmen sistematik olarak yanlış koda yönlendirir. Bugüne kadar bulunan örnek hataları:
+> - **YK-05:** İlk sürümdeki örnek, birden fazla çift olduğunda orijinalden farklı bir çift döndürüyordu. Örnek, sırayı koruyan sürümle değiştirildi.
+> - **YK-07:** "Önce" kodu girdi listesini `pop(0)` ile boşaltıyor, "sonra" kodu boşaltmıyordu. Model bu örneği kopyaladığı için `process_queue` gibi kodlar her denemede yan etki farkıyla kalıyordu. Örneğe `tasks.clear()` eklenince model düzeltmeyi kendiliğinden yapmaya başladı.
+> - **YK-01:** "Sonra" örneği set kullandığı için tekrarları kaybediyordu (`common([1], [1, 1])`: önce `[1, 1]`, sonra `[1]`). Örnek `Counter` ile düzeltildi.
+> - **YK-08:** Örnek yalnızca heap gereken durumu (`running_min`: her adımda en küçük) gösteriyordu. Model `top_scores` gibi yalnızca sonda sıralı veri gereken kodlarda da heap kullanıp sırası yanlış sonuç döndürüyordu. Örneğe ikinci bir fonksiyon (`top_three`: döngüden sonra bir kez `sorted`) eklendi.
+>
+> `tests/test_patterns_db_rag.py::test_examples_are_equivalent`, `patterns.py`'deki her örneği doğrulayıcıdan geçirir (dönüş değeri, hata tipi ve argüman yan etkileri). Desenler ekranından (`PUT /api/patterns/{code}`) yapılan düzenlemeler de kaydedilmeden önce aynı kontrolden geçer.
 
 ---
 
@@ -313,7 +329,7 @@ Tüm uçlar `/api` altındadır. Etkileşimli belgeler için `/docs` adresine ba
 |--------|-----------------|----------|
 | GET    | `/api/health`   | Veritabanı durumu, seçili LLM sağlayıcısı/modeli ve erişilebilirliği. Her iki bileşen de çalışıyorsa `status` alanı `"ok"`, değilse `"degraded"` olur; HTTP kodu her durumda 200'dür. |
 | GET    | `/api/patterns` | Yeşil Kod Desenleri listesi (`is_active`, `updated_at` dahil) |
-| PUT    | `/api/patterns/{code}` | Desenin `anti_pattern`, `solution`, `impact`, `example_before`, `example_after` alanlarını günceller. Başlık değiştirilemez. Geçersiz etki düzeyi (`yüksek`/`orta`/`düşük` dışında), boş metin veya sözdizimi hatalı örnek → **400**; bilinmeyen kod → 404 |
+| PUT    | `/api/patterns/{code}` | Desenin `anti_pattern`, `solution`, `impact`, `example_before`, `example_after` alanlarını günceller. Başlık değiştirilemez. İsteğe bağlı `example_inputs` ile test girdileri de güncellenir (verilmezse kayıtlı girdiler kullanılır). Geçersiz etki düzeyi (`yüksek`/`orta`/`düşük` dışında), boş metin, sözdizimi hatalı örnek, örnekte olmayan fonksiyona ait test girdisi veya **eşdeğer olmayan önce/sonra örneği** → **400**; bilinmeyen kod → 404 |
 | PATCH  | `/api/patterns/{code}/active` | `{"is_active": true\|false}` ile deseni aktif/pasif yapar; bilinmeyen kod → 404 |
 | POST   | `/api/analyze`  | Yalnızca AST analizi; LLM kullanmaz, hızlıdır |
 | POST   | `/api/optimize` | Analiz → LLM ile yeniden yazım → doğrulama → kayıt |
@@ -429,7 +445,7 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
   - Yeni desen türü arayüzden eklenemez; tespit kuralları `analyzer.py` içindedir.
   - Desen başlığı ve kodu değiştirilemez.
   - Düzenleme geçmişi tutulmaz: yalnızca son değişiklik zamanı (`updated_at`) saklanır, eski metne geri dönülemez.
-  - Desen düzenlemeleri doğrulanmaz: "sonra" örneğinin gerçekten daha verimli ve "önce" ile eşdeğer olduğu kontrol edilmez (yalnızca Python sözdizimi denetlenir). Hatalı bir örnek LLM'i yanlış yönlendirebilir; bu durumda bile eşdeğerlik testi yanlış kodu reddeder.
+  - Örnek düzenlemelerinde eşdeğerlik yalnızca kayıtlı test girdilerinde (ve doğrulayıcının bunlardan türettiği sıralı/ters/rastgele girdilerde) kontrol edilir; bir kanıt değildir. Zayıf girdilerle (ör. tekrarsız listeler) eşdeğer olmayan bir örnek geçebilir. "Sonra" örneğinin gerçekten daha verimli olduğu ve deseni gerçekten uyguladığı kontrol edilmez.
   - Geçmiş kayıtlarındaki bulgular, analiz anındaki desen ayarlarıyla saklanır; sonradan pasif yapılan bir desen eski kayıtlarda görünmeye devam eder.
 - **Başarısız öneriler API yanıtında yer alır.** Arayüz başarısız kodu "Önerilmez" olarak işaretler ve kopyalanmasını engeller, ancak kod `/api/optimize` ve `/api/history` yanıtlarında bulunur. API'yi doğrudan kullanan istemciler `status` alanını kontrol etmelidir.
 - **Kimlik doğrulama yoktur.** Panel, güvenilir bir iç ağda kullanılmak üzere tasarlanmıştır. Panele erişen herkes desenleri düzenleyebilir ve pasif yapabilir. Dışarıya açılacaksa önüne kimlik doğrulama yapan bir ters vekil (reverse proxy) konulmalıdır.

@@ -18,6 +18,7 @@ const PATTERNS = [
     example_after: 'y = 2',
     is_active: true,
     updated_at: '2026-10-24T10:00:00+00:00',
+    example_inputs: { f: [[1], [2]] },
   },
   {
     code: 'YK-02',
@@ -29,6 +30,7 @@ const PATTERNS = [
     example_after: 'b = 2',
     is_active: false,
     updated_at: null,
+    example_inputs: null,
   },
 ]
 
@@ -71,6 +73,7 @@ describe('PatternsTab', () => {
       impact: 'düşük',
       example_before: 'x = 1',
       example_after: 'y = 2',
+      example_inputs: { f: [[1], [2]] },
     })
     expect(within(card('YK-01')).queryByRole('button', { name: 'Kaydet' })).toBeNull()
   })
@@ -108,4 +111,45 @@ describe('PatternsTab', () => {
     await waitFor(() => expect(card('YK-01').classList.contains('inactive')).toBe(true))
     expect(api.setPatternActive).toHaveBeenCalledWith('YK-01', false)
   })
+
+  it('test girdileri okunabilir JSON olarak gelir ve düzenlenebilir', async () => {
+    vi.mocked(api.updatePattern).mockImplementation(async (code, form) => ({ ...PATTERNS[0], ...form }))
+    render(<PatternsTab />)
+    await screen.findByText('YK-01')
+    fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
+    const field = within(card('YK-01')).getByLabelText('Test girdileri (JSON)')
+    expect(field.value).toBe('{\n  "f": [[1],[2]]\n}')
+
+    fireEvent.change(field, { target: { value: '{"f": [[3], [4, 5]]}' } })
+    fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Kaydet' }))
+    await waitFor(() => expect(api.updatePattern).toHaveBeenCalled())
+    expect(api.updatePattern.mock.calls[0][1].example_inputs).toEqual({ f: [[3], [4, 5]] })
+  })
+
+  it.each([
+    ['{bozuk', 'Test girdileri geçerli JSON değil'],
+    ['[[1]]', 'biçiminde olmalı'],
+    ['{"f": [1, 2]}', 'biçiminde olmalı'],
+  ])('geçersiz test girdisi (%s) sunucuya gönderilmez', async (text, message) => {
+    render(<PatternsTab />)
+    await screen.findByText('YK-01')
+    fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
+    fireEvent.change(within(card('YK-01')).getByLabelText('Test girdileri (JSON)'), { target: { value: text } })
+    fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Kaydet' }))
+    expect(await within(card('YK-01')).findByText(new RegExp(message))).toBeTruthy()
+    expect(api.updatePattern).not.toHaveBeenCalled()
+  })
+
+  it('eşdeğer olmayan örnek için sunucu hatası formda gösterilir', async () => {
+    vi.mocked(api.updatePattern).mockRejectedValue(
+      new Error("İstek başarısız: 'Sonra' örneği 'önce' örneğiyle eşdeğer değil: common(*[[1, 1]]) için önce [1, 1], sonra [1]."),
+    )
+    render(<PatternsTab />)
+    await screen.findByText('YK-01')
+    fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
+    fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Kaydet' }))
+    expect(await screen.findByText(/eşdeğer değil: common/)).toBeTruthy()
+    expect(within(card('YK-01')).getByRole('button', { name: 'Kaydet' })).toBeTruthy()
+  })
 })
+

@@ -3,7 +3,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, llm
+from app import db, llm, main
+from app.patterns import EXAMPLE_INPUTS, PATTERNS_BY_CODE
 from app.main import app
 
 FIND_DUPLICATES = """\
@@ -114,10 +115,96 @@ def pattern_payload(**overrides) -> dict:
         "anti_pattern": "Kuruma özel açıklama.",
         "solution": "Kuruma özel çözüm.",
         "impact": "orta",
-        "example_before": "for x in a:\n    for y in b:\n        pass\n",
-        "example_after": "b_set = set(b)\n",
+        "example_before": PATTERNS_BY_CODE["YK-01"]["example_before"],
+        "example_after": PATTERNS_BY_CODE["YK-01"]["example_after"],
     }
     return {**payload, **overrides}
+
+
+# YK-01 için eşdeğer olmayan eski örnek: set tekrarları kaybeder.
+YK01_SET_AFTER = "def common(a, b):\n    b_set = set(b)\n    return [x for x in a if x in b_set]\n"
+# Eşdeğer, farklı yazılmış bir örnek.
+YK01_DICT_AFTER = (
+    "def common(a, b):\n    counts = {}\n    for y in b:\n        counts[y] = counts.get(y, 0) + 1\n"
+    "    out = []\n    for x in a:\n        out += [x] * counts.get(x, 0)\n    return out\n"
+)
+YK07_NO_CLEAR_AFTER = (
+    "from collections import deque\n\ndef drain(tasks):\n    queue = deque(tasks)\n    done = []\n"
+    "    while queue:\n        done.append(queue.popleft())\n    return done\n"
+)
+
+
+def yk07_payload(**overrides) -> dict:
+    p = PATTERNS_BY_CODE["YK-07"]
+    return {**pattern_payload(impact="yüksek", example_before=p["example_before"], example_after=p["example_after"]),
+            **overrides}
+
+
+def test_patterns_include_example_inputs(client):
+    first = client.get("/api/patterns").json()[0]
+    assert first["example_inputs"] == EXAMPLE_INPUTS["YK-01"]
+
+
+def test_text_only_edit_does_not_run_equivalence_check(client, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("örnekler değişmedi; doğrulayıcı çalışmamalı")
+    monkeypatch.setattr(main, "verify", boom)
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(solution="Yalnızca metin değişti."))
+    assert resp.status_code == 200
+
+
+def test_equivalent_example_edit_is_saved(client):
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(example_after=YK01_DICT_AFTER))
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["example_after"] == YK01_DICT_AFTER
+
+
+def test_non_equivalent_example_is_rejected(client):
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(example_after=YK01_SET_AFTER))
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail.startswith("'Sonra' örneği 'önce' örneğiyle eşdeğer değil")
+    assert "common(*[[1, 1, 2], [1, 1, 5]]) için önce [1, 1, 1, 1], sonra [1, 1]" in detail
+    saved = next(p for p in client.get("/api/patterns").json() if p["code"] == "YK-01")
+    assert saved["example_after"] == PATTERNS_BY_CODE["YK-01"]["example_after"]  # kaydedilmedi
+
+
+def test_side_effect_difference_in_example_is_rejected(client):
+    resp = client.put("/api/patterns/YK-07", json=yk07_payload(example_after=YK07_NO_CLEAR_AFTER))
+    assert resp.status_code == 400
+    assert "Yan etki farkı" in resp.json()["detail"] and "`tasks`" in resp.json()["detail"]
+
+
+def test_custom_example_inputs_are_validated_and_saved(client):
+    before = "def double(xs):\n    out = []\n    for x in xs:\n        out.append(x * 2)\n    return out\n"
+    after = "def double(xs):\n    return [x * 2 for x in xs]\n"
+    inputs = {"double": [[[1, 2]], [[]], [[5]]]}
+    resp = client.put("/api/patterns/YK-04", json=pattern_payload(
+        impact="düşük", example_before=before, example_after=after, example_inputs=inputs))
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["example_inputs"] == inputs
+
+    wrong = "def double(xs):\n    return [x * 3 for x in xs]\n"
+    resp = client.put("/api/patterns/YK-04", json=pattern_payload(
+        impact="düşük", example_before=before, example_after=wrong))  # kayıtlı girdiler kullanılır
+    assert resp.status_code == 400 and "double(*[[1, 2]]) için önce [2, 4], sonra [3, 6]" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("inputs, message", [
+    ({"baska": [[[1]]]}, "'önce' örneğinde yok: baska"),
+    ({"common": []}, "En az bir test girdisi gerekli"),
+])
+def test_invalid_example_inputs_are_rejected(client, inputs, message):
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(example_after=YK01_DICT_AFTER, example_inputs=inputs))
+    assert resp.status_code == 400 and message in resp.json()["detail"]
+
+
+def test_missing_inputs_are_required_when_examples_change(client):
+    with db.SessionLocal() as s:
+        s.get(db.GreenPattern, "YK-01").example_inputs = None
+        s.commit()
+    resp = client.put("/api/patterns/YK-01", json=pattern_payload(example_after=YK01_DICT_AFTER))
+    assert resp.status_code == 400 and "test girdileri gerekli" in resp.json()["detail"]
 
 
 def test_update_pattern(client):
@@ -319,3 +406,239 @@ def test_wrong_values_do_not_get_order_hint(client, monkeypatch):
     fake = use_llm(monkeypatch, llm_result(always_empty), llm_result(GREEN_DUPLICATES))
     client.post("/api/optimize", json={"code": FIND_DUPLICATES})
     assert "SIRASI farklı" not in fake.calls[1]["feedback"]
+
+
+def test_fib_without_llm_benchmark_input_is_still_measured(client, monkeypatch):
+    naive = "def fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n"
+    iterative = "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
+    result = {**llm_result(iterative), "test_inputs": {"fib": [[0], [1], [5], [10], [18]]}, "benchmark_input": {}}
+    use_llm(monkeypatch, result)
+    body = client.post("/api/optimize", json={"code": naive}).json()
+
+    assert body["status"] == "optimized"
+    bench = body["verification"]["benchmark"]
+    assert bench is not None and bench["speedup"] > 10
+    assert "en büyüğüyle" in bench["functions"][0]["note"]
+    assert body["energy"] is not None
+
+
+PROCESS_QUEUE = (
+    "def process_queue(tasks):\n    done = []\n    while tasks:\n        done.append(tasks.pop(0) * 2)\n    return done\n"
+)
+
+
+def queue_result(green_code: str) -> dict:
+    return {**llm_result(green_code), "changes": [{"pattern": "YK-07", "explanation": "deque"}],
+            "test_inputs": {"process_queue": [[[1, 2, 3]], [[]], [[5]], [[4, 4, 1]]]}, "benchmark_input": {}}
+
+
+def test_side_effect_feedback_tells_llm_how_argument_differs(client, monkeypatch):
+    no_clear = ("from collections import deque\ndef process_queue(tasks):\n    queue = deque(tasks)\n"
+                "    done = []\n    while queue:\n        done.append(queue.popleft() * 2)\n    return done\n")
+    with_clear = no_clear.replace("    queue = deque(tasks)\n", "    queue = deque(tasks)\n    tasks.clear()\n")
+    fake = use_llm(monkeypatch, queue_result(no_clear), queue_result(with_clear))
+    body = client.post("/api/optimize", json={"code": PROCESS_QUEUE}).json()
+
+    feedback = fake.calls[1]["feedback"]
+    assert "YAN ETKİ FARKI" in feedback
+    assert "`tasks` argümanını [] hâline getiriyor, senin kodun [1, 2, 3] bırakıyor" in feedback
+    assert "bu yan etkiyi koru" in feedback
+    assert "beklenen (orijinal) [2, 4, 6], senin kodun [2, 4, 6]" not in feedback  # çelişkili satır yok
+    assert body["status"] == "optimized" and body["attempts"] == 2
+
+
+def test_side_effect_failure_message(client, monkeypatch):
+    no_clear = ("from collections import deque\ndef process_queue(tasks):\n    queue = deque(tasks)\n"
+                "    done = []\n    while queue:\n        done.append(queue.popleft() * 2)\n    return done\n")
+    use_llm(monkeypatch, queue_result(no_clear), queue_result(no_clear))
+    body = client.post("/api/optimize", json={"code": PROCESS_QUEUE}).json()
+    assert body["status"] == "failed"
+    assert body["error"].startswith("Yan etki farkı")
+
+
+# --------------------------------------------------------------------------- #
+# Tespit edilen desenleri gidermeyen (ör. değişmemiş) kod optimizasyon sayılmaz
+# --------------------------------------------------------------------------- #
+
+TOP_SCORES = (
+    "def top_scores(scores):\n    result = []\n    for s in scores:\n"
+    "        result.append(s)\n        result.sort()\n    return result[-3:]\n"
+)
+TOP_SCORES_GREEN = "def top_scores(scores):\n    return sorted(scores)[-3:]\n"
+
+
+def scores_result(green_code: str) -> dict:
+    return {**llm_result(green_code), "changes": [{"pattern": "YK-08", "explanation": "tek sıralama"}],
+            "test_inputs": {"top_scores": [[[50, 90, 70, 80]], [[]], [[5]], [[3, 3, 1]]]}, "benchmark_input": {}}
+
+
+@pytest.fixture
+def verify_calls(monkeypatch):
+    calls = []
+    real = main.verify
+
+    def counting(*args, **kwargs):
+        calls.append(args[1])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(main, "verify", counting)
+    return calls
+
+
+def test_unchanged_code_is_rejected_without_verification(client, monkeypatch, verify_calls):
+    fake = use_llm(monkeypatch, scores_result(TOP_SCORES), scores_result(TOP_SCORES_GREEN))
+    body = client.post("/api/optimize", json={"code": TOP_SCORES}).json()
+
+    assert body["status"] == "optimized" and body["attempts"] == 2
+    assert verify_calls == [TOP_SCORES_GREEN]  # değişmemiş kod doğrulayıcıya gönderilmedi
+    feedback = fake.calls[1]["feedback"]
+    assert "orijinal kodla AYNI" in feedback and "YK-08" in feedback and "Satır 5" in feedback
+
+
+def test_whitespace_only_change_counts_as_unchanged(client, monkeypatch):
+    reformatted = TOP_SCORES.replace("    ", "\t").replace("\n", "  \r\n")
+    use_llm(monkeypatch, scores_result(reformatted), scores_result(reformatted))
+    body = client.post("/api/optimize", json={"code": TOP_SCORES}).json()
+    assert body["status"] == "failed"
+    assert body["error"].startswith("Önerilen kod orijinalle aynı")
+
+
+def test_changed_code_that_keeps_all_patterns_is_rejected(client, monkeypatch, verify_calls):
+    # Kod değişmiş ama döngü içindeki sıralama duruyor (sorted() ile).
+    still_sorting = (
+        "def top_scores(scores):\n    result = []\n    for s in scores:\n"
+        "        result = sorted(result + [s])\n    return result[-3:]\n"
+    )
+    fake = use_llm(monkeypatch, scores_result(still_sorting), scores_result(still_sorting))
+    body = client.post("/api/optimize", json={"code": TOP_SCORES}).json()
+
+    assert body["status"] == "failed" and body["attempts"] == 2
+    assert body["error"] == "Önerilen kod tespit edilen desenlerin hiçbirini gidermiyor; hâlâ YK-08 içeriyor."
+    assert body["verification"] is None and verify_calls == []
+    assert body["green_code"] == still_sorting  # inceleme için gösterilir ("Önerilmez")
+    feedback = fake.calls[1]["feedback"]
+    assert "HİÇBİRİNİ gidermedi" in feedback
+    assert "YK-08 Döngü içinde sıralama — satır 4: `result = sorted(result + [s])`" in feedback
+
+
+def test_partial_progress_goes_to_verification(client, monkeypatch, verify_calls):
+    # find_duplicates: YK-01 + YK-02 (+ YK-04). Yalnızca YK-02 giderildi, iç içe döngü duruyor.
+    only_membership = """\
+def find_duplicates(items):
+    duplicates = []
+    seen = set()
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if items[i] == items[j] and items[i] not in seen:
+                seen.add(items[i])
+                duplicates.append(items[i])
+    return duplicates
+"""
+    use_llm(monkeypatch, llm_result(only_membership))
+    body = client.post("/api/optimize", json={"code": FIND_DUPLICATES}).json()
+    assert verify_calls == [only_membership]
+    assert body["status"] == "optimized", body["error"]
+
+
+# --------------------------------------------------------------------------- #
+# Sıra ipucu önerilen koda göre
+# --------------------------------------------------------------------------- #
+
+HEAP_TOP3 = (
+    "import heapq\n\ndef top_scores(scores):\n    result = []\n    for s in scores:\n"
+    "        heapq.heappush(result, s)\n        if len(result) > 3:\n            heapq.heappop(result)\n"
+    "    return result\n"
+)
+
+
+def test_heap_order_error_gets_heap_hint_not_set_hint(client, monkeypatch):
+    fake = use_llm(monkeypatch, scores_result(HEAP_TOP3), scores_result(TOP_SCORES_GREEN))
+    body = client.post("/api/optimize", json={"code": TOP_SCORES}).json()
+    feedback = fake.calls[1]["feedback"]
+    assert "SIRASI farklı" in feedback
+    assert "heapq listeyi sıralı TUTMAZ" in feedback and "sorted(...)" in feedback
+    assert "ARTAN SIRADA" in feedback          # orijinal sonuç sıralı
+    assert "set'in dolaşma sırası" not in feedback  # kodda set yok
+    assert body["status"] == "optimized"
+
+
+def test_set_order_error_keeps_set_hint(client, monkeypatch):
+    set_order = (
+        "def find_duplicates(items):\n    seen, dups = set(), set()\n    for x in items:\n"
+        "        (dups if x in seen else seen).add(x)\n    return list(dups)\n"
+    )
+    fake = use_llm(monkeypatch, llm_result(set_order), llm_result(GREEN_DUPLICATES))
+    client.post("/api/optimize", json={"code": FIND_DUPLICATES})
+    feedback = fake.calls[1]["feedback"]
+    assert "set'in dolaşma sırası tanımsızdır" in feedback and "heapq" not in feedback
+
+
+def test_order_hint_without_set_or_heap_is_generic():
+    from app.main import _order_hint
+    hint = _order_hint([{"old": "[3, 1, 2]", "new": "[1, 2, 3]"}], "def f(a):\n    return sorted(a)\n")
+    assert "çıktı sırasını" in hint and "set" not in hint and "heapq" not in hint
+
+
+# --------------------------------------------------------------------------- #
+# Tekrar sayısı ipucu (veriden çıkarılır, fonksiyona özel değil)
+# --------------------------------------------------------------------------- #
+
+from app.main import _multiplicity_lost  # noqa: E402
+
+COMMON_USERS = (
+    "def find_common_users(group_a, group_b):\n    common = []\n    for a in group_a:\n"
+    "        for b in group_b:\n            if a == b:\n                common.append(a)\n    return common\n"
+)
+COMMON_FILTER = (
+    "from collections import Counter\n\ndef find_common_users(group_a, group_b):\n"
+    "    counts = Counter(group_b)\n    return [x for x in group_a if counts[x] > 0]\n"
+)
+COMMON_COUNTS = (
+    "from collections import Counter\n\ndef find_common_users(group_a, group_b):\n"
+    "    counts = Counter(group_b)\n    result = []\n    for x in group_a:\n"
+    "        result.extend([x] * counts[x])\n    return result\n"
+)
+
+
+def users_result(green_code: str) -> dict:
+    return {**llm_result(green_code), "changes": [{"pattern": "YK-01", "explanation": "Counter"}],
+            "test_inputs": {"find_common_users": [[[1, 2, 3], [2, 3, 4]], [[], [1]], [[1], [1, 1]], [["a"], ["b"]]]},
+            "benchmark_input": {}}
+
+
+@pytest.mark.parametrize("old, new, expected", [
+    ("[1, 1]", "[1]", True),                 # tekrar eksik
+    ("[1, 1, 2, 2, 2]", "[1, 2]", True),
+    ("['a', 'a', 'b']", "['a', 'b']", True),
+    ("[1, 2]", "[2, 1]", False),             # yalnızca sıra farkı (sıra ipucunun alanı)
+    ("[1, 1]", "[]", False),                 # eleman kaybı: farklı elemanlar
+    ("[1, 1]", "[1, 2]", False),             # yeni eleman
+    ("[1]", "[1, 1]", False),                # fazla tekrar
+    ("[1, 1]", "[1, 1]", False),             # eşit
+    ("5", "3", False),                       # liste değil
+    ("[[1], [1]]", "[[1]]", True),           # hash'lenemeyen elemanlar repr ile sayılır
+])
+def test_multiplicity_lost(old, new, expected):
+    assert _multiplicity_lost(old, new) is expected
+
+
+def test_lost_repeats_get_counter_hint(client, monkeypatch):
+    fake = use_llm(monkeypatch, users_result(COMMON_FILTER), users_result(COMMON_COUNTS))
+    body = client.post("/api/optimize", json={"code": COMMON_USERS}).json()
+    feedback = fake.calls[1]["feedback"]
+    assert "TEKRAR SAYILARI eksik" in feedback
+    assert "find_common_users(*[[1], [1, 1]]) için orijinal [1, 1], seninki [1]" in feedback  # en küçük karşı örnek
+    assert "result.extend([x] * counts[x])" in feedback
+    assert "SIRASI farklı" not in feedback
+    assert body["status"] == "optimized" and body["attempts"] == 2
+
+
+def test_order_only_difference_does_not_get_repeat_hint(client, monkeypatch):
+    set_order = (
+        "def find_duplicates(items):\n    seen, dups = set(), set()\n    for x in items:\n"
+        "        (dups if x in seen else seen).add(x)\n    return list(dups)\n"
+    )
+    fake = use_llm(monkeypatch, llm_result(set_order), llm_result(GREEN_DUPLICATES))
+    client.post("/api/optimize", json={"code": FIND_DUPLICATES})
+    assert "TEKRAR SAYILARI" not in fake.calls[1]["feedback"]
+

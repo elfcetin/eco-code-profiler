@@ -94,4 +94,28 @@ describe('Tahmini enerji etkisi', () => {
     expect(screen.getByText('Ölçülen süre')).toBeTruthy()
     expect(screen.queryByText('Tahmini enerji etkisi')).toBeNull()
   })
+
+  it('alt sınır hızlanmayı "≥" ile ve uyarıyla gösterir', () => {
+    render(<BenchmarkCard benchmark={{ old_seconds: 0.0074, new_seconds: 2.9e-7, speedup: 7400, speedup_is_lower_bound: true, functions: [] }} />)
+    expect(document.querySelector('.speedup-value').textContent).toBe('≥ 7.400×')
+    expect(screen.getByText(/Hızlanma 1 µs'ye göre hesaplanan bir alt\s+sınırdır/)).toBeTruthy()
+    expect(screen.getByText('290 ns')).toBeTruthy()
+  })
+
+  it('iki süre de çok kısaysa oran göstermez', () => {
+    render(<BenchmarkCard benchmark={{ old_seconds: 5e-7, new_seconds: 1e-7, speedup: null, speedup_is_lower_bound: false, functions: [] }} />)
+    expect(document.querySelector('.speedup-value')).toBeNull()
+    expect(screen.getByText(/hızlanma oranı güvenilir biçimde hesaplanamadı/)).toBeTruthy()
+  })
+
+  it('test girdisiyle yapılan otomatik ölçüm notunu tek uyarı olarak gösterir', () => {
+    const functions = [{
+      function: 'fib', auto: true, worst_case: null,
+      note: 'LLM ölçüm girdisi vermediği için test girdilerinin en büyüğüyle ölçüldü: fib(*[18]). Bu girdi küçük olabilir; daha büyük girdilerde fark farklı olabilir.',
+    }]
+    render(<BenchmarkCard benchmark={{ ...BENCH, functions }} />)
+    expect(screen.getByText(/fib: LLM ölçüm girdisi vermediği için test girdilerinin en büyüğüyle/)).toBeTruthy()
+    expect(screen.queryByText(/örnek girdilerden otomatik üretildi/)).toBeNull()
+  })
 })
+

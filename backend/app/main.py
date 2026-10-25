@@ -73,6 +73,8 @@ class PatternUpdate(BaseModel):
     impact: str
     example_before: str = Field(max_length=10_000)
     example_after: str = Field(max_length=10_000)
+    # Örneklerin eşdeğerlik kontrolü için {fonksiyon: [[argümanlar], ...]}; verilmezse kayıtlı girdiler.
+    example_inputs: dict[str, list[list[Any]]] | None = None
 
 
 class EnergyRequest(BaseModel):
@@ -118,7 +120,130 @@ def _only_order_differs(old_repr: str | None, new_repr: str | None) -> bool:
         return False
 
 
-def _verification_feedback(verification: dict) -> str:
+def _unresolved_patterns(code: str, analysis: dict, green_code: str, catalog: dict) -> tuple[str, str] | None:
+    """Önerilen kod tespit edilen desenlerin HİÇBİRİNİ gidermiyorsa (hata, LLM geri bildirimi).
+
+    Değişmemiş kod kendisiyle doğal olarak eşdeğer olduğundan doğrulamadan geçer; bu kontrol
+    olmadan "optimize edildi" sayılırdı. Bir desenin bulgu sayısı azaldıysa ilerleme vardır
+    (ör. iki YK-02'den biri giderildi). İlerleme varsa None.
+    """
+    if report.normalize_code(green_code) == report.normalize_code(code):
+        return (
+            "Önerilen kod orijinalle aynı (yalnızca boşluk/biçim farkı); hiçbir desen uygulanmadı.",
+            "Önceki yanıtında gönderdiğin kod orijinal kodla AYNI; hiçbir değişiklik yapmadın. Orijinal "
+            "kodu aynen döndürme. Tespit edilen desenleri onaylı çözümlerine göre uygula:\n"
+            + "\n".join(f"- Satır {f['line']}: {f['pattern_code']} {f['title']}" for f in analysis["findings"]),
+        )
+    before = Counter(f["pattern_code"] for f in analysis["findings"])
+    after_findings = analyze(green_code, catalog)["findings"]
+    after = Counter(f["pattern_code"] for f in after_findings)
+    if any(after[c] < n for c, n in before.items()):
+        return None
+    lines = green_code.splitlines()
+    remaining = [f for f in after_findings if f["pattern_code"] in before]
+    details = [
+        f"- {f['pattern_code']} {f['title']} — satır {f['line']}: `{lines[f['line'] - 1].strip()}`"
+        if 0 < f["line"] <= len(lines) else f"- {f['pattern_code']} {f['title']} — satır {f['line']}"
+        for f in remaining
+    ]
+    codes = ", ".join(sorted(before))
+    return (
+        f"Önerilen kod tespit edilen desenlerin hiçbirini gidermiyor; hâlâ {codes} içeriyor.",
+        "Önceki kodun tespit edilen desenlerin HİÇBİRİNİ gidermedi. Kodun hâlâ şunları içeriyor:\n"
+        + "\n".join(details)
+        + "\nBu desenleri onaylı çözümlerine göre uygula; davranışı (çıktı ve sırası dahil) koru.",
+    )
+
+
+def _uses(code: str | None) -> set[str]:
+    """Önerilen kodda sırayı bozabilecek yapılar: {"set", "heapq"}."""
+    try:
+        tree = ast.parse(code or "")
+    except SyntaxError:
+        return set()
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Set, ast.SetComp)) or (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in ("set", "frozenset")
+        ):
+            found.add("set")
+        elif (isinstance(node, ast.Name) and node.id == "heapq") or (
+            isinstance(node, ast.ImportFrom) and node.module == "heapq"
+        ):
+            found.add("heapq")
+    return found
+
+
+def _is_sorted_repr(value: str | None) -> bool:
+    try:
+        items = ast.literal_eval(value or "")
+        return isinstance(items, (list, tuple)) and len(items) > 1 and list(items) == sorted(items)
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return False
+
+
+def _order_hint(failing: list[dict], green_code: str | None) -> str:
+    """Yalnızca sırası farklı sonuçlar için, önerilen koda göre ipucu (sabit "set" ipucu, kodda set
+    yokken modeli yanlış yöne itiyordu)."""
+    hint = ["ÖNEMLİ: Sonuçların elemanları doğru ama SIRASI farklı."]
+    used = _uses(green_code)
+    if "heapq" in used:
+        hint.append(
+            "heapq listeyi sıralı TUTMAZ; yalnızca en küçük eleman başta durur (heap[0]), geri kalanın sırası "
+            "tanımsızdır. Heap'i doğrudan döndürme/dilimleme; sonucu sorted(...) ile döndür. Sıralı veri yalnızca "
+            "döngü bittikten sonra gerekiyorsa heap yerine sıralamayı döngüden sonra bir kez yap."
+        )
+    if "set" in used:
+        hint.append(
+            "set'in dolaşma sırası tanımsızdır; sonucu set'ten üretme. Orijinalin sırasını (ör. ilk görülme "
+            "sırası) korumak için dict, collections.Counter veya ekleme sırasıyla doldurulan bir liste kullan."
+        )
+    if any(_is_sorted_repr(c.get("old")) for c in failing):
+        hint.append("Orijinal kodun sonucu ARTAN SIRADA; seninki de aynı sırada olmalı.")
+    if len(hint) == 1:
+        hint.append("Orijinal kodun çıktı sırasını (ör. ekleme veya ilk görülme sırası) birebir koru.")
+    return " ".join(hint)
+
+
+def _multiplicity_lost(old_repr: str | None, new_repr: str | None) -> bool:
+    """Yeni sonuç orijinalle aynı farklı elemanları içeriyor ama bazılarının TEKRAR SAYISI eksik mi?
+
+    (Yeni sonucun eleman sayımı orijinalinkinin alt kümesi.) Tipik neden: her eşleşme için eleman
+    ekleyen iç döngünün set/`in`/`if counts[x]` ile yalnızca var/yok kontrolüne çevrilmesi.
+    """
+    try:
+        old, new = ast.literal_eval(old_repr or ""), ast.literal_eval(new_repr or "")
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return False
+    if not (isinstance(old, (list, tuple)) and isinstance(new, (list, tuple))):
+        return False
+    try:
+        old_counts, new_counts = Counter(map(repr, old)), Counter(map(repr, new))
+    except TypeError:
+        return False
+    return (
+        old_counts != new_counts
+        and set(old_counts) == set(new_counts)
+        and all(new_counts[k] <= n for k, n in old_counts.items())
+    )
+
+
+def _multiplicity_hint(cases: list[dict]) -> str:
+    example = next(
+        (c["minimal"] | {"function": c["function"]} for c in cases
+         if c.get("minimal") and _multiplicity_lost(c["minimal"]["old"], c["minimal"]["new"])),
+        cases[0],
+    )
+    return (
+        "ÖNEMLİ: Sonuçta doğru elemanlar var ama TEKRAR SAYILARI eksik (ör. "
+        f"{example['function']}(*{example['input']}) için orijinal {example['old']}, seninki {example['new']}). "
+        "Orijinal kod her eşleşme için bir eleman ekliyor (tekrarlar korunuyor); yalnızca var/yok kontrolü "
+        "(set, `in`, `if counts[x]`) tekrarları kaybeder. Eşleşme sayısını koru: collections.Counter ile say "
+        "ve her eleman için sayısı kadar ekle (ör. result.extend([x] * counts[x]))."
+    )
+
+
+def _verification_feedback(verification: dict, green_code: str | None = None) -> str:
     """Başarısız doğrulamayı LLM'e geri bildirim olarak özetler."""
     lines = ["Önceki optimize edilmiş kod doğrulamadan GEÇEMEDİ."]
     if verification.get("error"):
@@ -131,7 +256,16 @@ def _verification_feedback(verification: dict) -> str:
                 f"{mini['old']} döndürüyor, senin kodun {mini['new']} döndürüyor. Kodunu bu örnek "
                 "üzerinde adım adım izleyerek düzelt."
             )
-    for case in [c for c in verification.get("cases", []) if not c.get("equal")][:5]:
+    side_effects = [c for c in verification.get("cases", []) if c.get("side_effect")]
+    for case in side_effects[:2]:
+        for change in case["side_effect"]:
+            lines.append(
+                f"YAN ETKİ FARKI: {case['function']}(*{case['input']}) çağrısından sonra orijinal kod "
+                f"`{change['name']}` argümanını {change['old']} hâline getiriyor, senin kodun {change['new']} "
+                f"bırakıyor (çağrıdan önce {change['before']}). Dönüş değerin doğru; `{change['name']}` "
+                "argümanını da orijinal kodla aynı şekilde değiştir (bu yan etkiyi koru)."
+            )
+    for case in [c for c in verification.get("cases", []) if not c.get("equal") and not c.get("side_effect")][:5]:
         line = (
             f"- {case['function']}(*{case['input']}): beklenen (orijinal) {case.get('old')}, "
             f"senin kodun {case.get('new')}"
@@ -145,12 +279,12 @@ def _verification_feedback(verification: dict) -> str:
         elif entry.get("outputs_equal") is False:
             lines.append(f"- Benchmark ({entry['function']}): büyük girdide sonuçlar orijinalden farklı.")
     failing = [c for c in verification.get("cases", []) if not c.get("equal")]
-    if any(_only_order_differs(c.get("old"), c.get("new")) for c in failing):
-        lines.append(
-            "ÖNEMLİ: Sonuçların elemanları doğru ama SIRASI farklı. set'in dolaşma sırası tanımsızdır; "
-            "sonucu set'ten üretme. Orijinalin sırasını (ör. ilk görülme sırası) korumak için dict, "
-            "collections.Counter veya ekleme sırasıyla doldurulan bir liste kullan."
-        )
+    order_only = [c for c in failing if _only_order_differs(c.get("old"), c.get("new"))]
+    if order_only:
+        lines.append(_order_hint(order_only, green_code))
+    fewer_repeats = [c for c in failing if _multiplicity_lost(c.get("old"), c.get("new"))]
+    if fewer_repeats:
+        lines.append(_multiplicity_hint(fewer_repeats))
     lines.append("Davranışı (çıktı sırası ve hata tipleri dahil) orijinalle birebir aynı tut.")
     return "\n".join(lines)
 
@@ -178,6 +312,44 @@ def _validate_pattern_update(req: PatternUpdate) -> None:
             raise HTTPException(
                 status_code=400, detail=f"{labels[field]} geçerli Python değil (satır {exc.lineno}): {exc.msg}"
             ) from exc
+
+
+EXAMPLE_CHECK_TIMEOUT = 20
+
+
+def _check_examples_equivalent(before: str, after: str, inputs: dict | None) -> None:
+    """'Sonra' örneği 'önce' ile aynı davranmıyorsa 400 (dönüş değeri, hata tipi, argüman yan etkisi).
+
+    Modeller onaylı örnekleri birebir kopyaladığı için eşdeğer olmayan bir örnek LLM'i sistematik
+    olarak yanlış koda yönlendirir. patterns.py'deki örnekleri aynı kontrolle test eden:
+    tests/test_patterns_db_rag.py::test_examples_are_equivalent.
+    """
+    if not inputs:
+        raise HTTPException(status_code=400, detail=(
+            "Örneklerin eşdeğerliğini doğrulamak için test girdileri gerekli: "
+            '{"fonksiyon_adı": [[argümanlar], ...]}'))
+    functions = {n.name for n in ast.parse(before).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    unknown = sorted(set(inputs) - functions)
+    if unknown:
+        raise HTTPException(status_code=400, detail=(
+            f"Test girdilerindeki fonksiyon(lar) 'önce' örneğinde yok: {', '.join(unknown)} "
+            f"(örnekteki fonksiyonlar: {', '.join(sorted(functions)) or 'yok'})."))
+    if not any(inputs.values()):
+        raise HTTPException(status_code=400, detail="En az bir test girdisi gerekli.")
+
+    result = verify(before, after, inputs, measure=False, timeout=EXAMPLE_CHECK_TIMEOUT)
+    if result["passed"]:
+        return
+    failing = [c for c in result["cases"] if not c.get("equal")]
+    case = failing[0] if failing else None
+    if case is None or case.get("side_effect"):
+        reason = result.get("error") or "doğrulama tamamlanamadı."
+    elif case.get("old") is None:
+        reason = case.get("note") or result.get("error") or "test girdisi çalıştırılamadı."
+    else:
+        derived = f" (sistemin türettiği {case['derived']} girdi)" if case.get("derived") else ""
+        reason = f"{case['function']}(*{case['input']}){derived} için önce {case['old']}, sonra {case['new']}."
+    raise HTTPException(status_code=400, detail=f"'Sonra' örneği 'önce' örneğiyle eşdeğer değil: {reason}")
 
 
 def _save_run(session: Session, code: str, response: OptimizeResponse) -> OptimizeResponse:
@@ -226,6 +398,15 @@ def patterns(session: Session = Depends(db.get_session)) -> list[dict]:
 def update_pattern(code: str, req: PatternUpdate, session: Session = Depends(db.get_session)) -> dict:
     pattern = _get_pattern(session, code)
     _validate_pattern_update(req)
+    inputs = req.example_inputs if req.example_inputs is not None else pattern.example_inputs
+    examples_changed = (
+        req.example_before != pattern.example_before
+        or req.example_after != pattern.example_after
+        or inputs != pattern.example_inputs
+    )
+    if examples_changed:  # yalnızca metin/etki düzenlemelerinde alt süreç çalıştırılmaz
+        _check_examples_equivalent(req.example_before, req.example_after, inputs)
+    pattern.example_inputs = inputs
     pattern.anti_pattern = req.anti_pattern.strip()
     pattern.solution = req.solution.strip()
     pattern.impact = req.impact
@@ -288,12 +469,17 @@ def optimize_code(req: CodeRequest, session: Session = Depends(db.get_session)) 
             break
 
         result = candidate
+        unresolved = _unresolved_patterns(code, analysis, candidate["green_code"], catalog)
+        if unresolved:  # değişmemiş kod doğrulamadan geçer ama optimizasyon değildir: alt süreç çalıştırılmaz
+            error, feedback = unresolved
+            verification = None
+            continue
         verification = verify(code, candidate["green_code"], candidate["test_inputs"], candidate["benchmark_input"])
         if verification["passed"]:
             error = None
             break
         error = verification.get("error") or "Optimize edilmiş kod orijinalle aynı sonuçları vermedi."
-        feedback = _verification_feedback(verification)
+        feedback = _verification_feedback(verification, candidate["green_code"])
 
     passed = bool(verification and verification["passed"])
     green_code = result["green_code"] if result else None

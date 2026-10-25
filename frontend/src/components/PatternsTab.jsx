@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import { IMPACT_RANK, formatDate } from '../format.js'
+import Field from './Field.jsx'
 import { ImpactBadge } from './ResultCards.jsx'
 
 const IMPACTS = Object.keys(IMPACT_RANK)
@@ -8,6 +9,27 @@ const EDITABLE = ['anti_pattern', 'solution', 'impact', 'example_before', 'examp
 
 function pick(pattern) {
   return Object.fromEntries(EDITABLE.map((key) => [key, pattern[key]]))
+}
+
+/** {"f": [[1], [2]]} -> her fonksiyon tek satırda, okunabilir JSON. */
+function formatInputs(inputs) {
+  const entries = Object.entries(inputs ?? {})
+  if (!entries.length) return '{}'
+  return `{\n${entries.map(([fn, cases]) => `  ${JSON.stringify(fn)}: ${JSON.stringify(cases)}`).join(',\n')}\n}`
+}
+
+function parseInputs(text) {
+  let value
+  try {
+    value = JSON.parse(text)
+  } catch (e) {
+    throw new Error(`Test girdileri geçerli JSON değil: ${e.message}`)
+  }
+  const ok =
+    value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.values(value).every((cases) => Array.isArray(cases) && cases.every(Array.isArray))
+  if (!ok) throw new Error('Test girdileri {"fonksiyon_adı": [[argümanlar], ...]} biçiminde olmalı.')
+  return value
 }
 
 function ActiveSwitch({ pattern, onChange, disabled }) {
@@ -28,16 +50,24 @@ function ActiveSwitch({ pattern, onChange, disabled }) {
 
 function PatternForm({ pattern, onSave, onCancel }) {
   const [form, setForm] = useState(() => pick(pattern))
+  const [inputsText, setInputsText] = useState(() => formatInputs(pattern.example_inputs))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const set = (key) => (e) => setForm((f) => ({ ...f, [key]: e.target.value }))
 
   async function submit(e) {
     e.preventDefault()
-    setSaving(true)
     setError(null)
+    let exampleInputs
     try {
-      await onSave(form)
+      exampleInputs = parseInputs(inputsText)
+    } catch (err) {
+      setError(err.message)
+      return
+    }
+    setSaving(true)
+    try {
+      await onSave({ ...form, example_inputs: exampleInputs })
     } catch (err) {
       setError(err.message)
       setSaving(false)
@@ -46,37 +76,46 @@ function PatternForm({ pattern, onSave, onCancel }) {
 
   return (
     <form className="pattern-form" onSubmit={submit}>
-      <label className="field">
-        <span>Sorun</span>
+      <Field label="Sorun">
         <textarea rows={3} value={form.anti_pattern} onChange={set('anti_pattern')} required />
-      </label>
-      <label className="field">
-        <span>Çözüm</span>
+      </Field>
+      <Field label="Çözüm">
         <textarea rows={3} value={form.solution} onChange={set('solution')} required />
-      </label>
-      <label className="field field-inline">
-        <span>Etki</span>
+      </Field>
+      <Field label="Etki" inline>
         <select value={form.impact} onChange={set('impact')}>
           {IMPACTS.map((i) => (
             <option key={i} value={i}>{i}</option>
           ))}
         </select>
-      </label>
+      </Field>
       <div className="pattern-examples">
-        <label className="field">
-          <span>Önce</span>
+        <Field label="Önce">
           <textarea className="code-input" rows={8} spellCheck={false} value={form.example_before} onChange={set('example_before')} required />
-        </label>
-        <label className="field">
-          <span>Sonra</span>
+        </Field>
+        <Field label="Sonra">
           <textarea className="code-input" rows={8} spellCheck={false} value={form.example_after} onChange={set('example_after')} required />
-        </label>
+        </Field>
       </div>
+      <Field label="Test girdileri (JSON)">
+        <textarea
+          className="code-input"
+          rows={4}
+          spellCheck={false}
+          value={inputsText}
+          onChange={(e) => setInputsText(e.target.value)}
+        />
+      </Field>
+      <p className="muted small">
+        Kaydederken “Sonra” örneğinin “Önce” ile aynı davrandığı (dönüş değeri, hata tipi ve argüman yan etkileri)
+        bu girdilerle doğrulanır; eşdeğer olmayan örnek kaydedilmez. Biçim:{' '}
+        <code>{'{"fonksiyon_adı": [[argümanlar], ...]}'}</code>
+      </p>
       {error && <p className="error-banner">{error}</p>}
       <div className="actions">
         <button type="submit" className="btn btn-primary" disabled={saving}>
           {saving && <span className="spinner" aria-hidden="true" />}
-          Kaydet
+          {saving ? 'Doğrulanıyor…' : 'Kaydet'}
         </button>
         <button type="button" className="btn btn-secondary" onClick={onCancel} disabled={saving}>
           İptal

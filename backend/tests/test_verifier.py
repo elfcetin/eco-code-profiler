@@ -1,6 +1,8 @@
 import os
 import time
 
+import pytest
+
 from app.patterns import PATTERNS_BY_CODE
 from app.verifier import verify
 
@@ -80,7 +82,7 @@ def test_different_argument_mutation_is_not_equal():
     new = "def total(xs):\n    s = sum(xs)\n    xs.clear()\n    return s\n"
     result = verify(old, new, {"total": [[[1, 2, 3]]]})
     assert result["passed"] is False
-    assert "yan etki" in result["cases"][0]["note"]
+    assert "yan etki" in result["cases"][0]["note"].lower()
 
 
 def test_benchmark_single_list_argument_is_wrapped():
@@ -372,3 +374,193 @@ def test_functions_without_early_return_have_no_worst_case_flag():
     new = "def total(items):\n    return sum(items)\n"
     result = verify(old, new, {"total": [[[1, 2, 3]], [[]], [[5]], [[4, 4]]]})
     assert result["benchmark"]["functions"][0]["worst_case"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Ölçüm tekrarları arasında önbellek / global durum sıfırlanır
+# --------------------------------------------------------------------------- #
+
+from app.verifier import MIN_RELIABLE_SECONDS, _speedup, _summarize_benchmark  # noqa: E402
+
+# Önbelleğe alınmamış her çağrı 20 ms uyur. Önbellek tekrarlar arasında taşınsaydı 2. ve 3.
+# tekrar anında döner ve "en iyi" süre ~0 olurdu.
+SLOW_CACHED = """\
+import time
+from functools import lru_cache
+
+@lru_cache(maxsize=None)
+def slow(n):
+    time.sleep(0.02)
+    return n * 2
+"""
+
+SLOW_MANUAL_MEMO = """\
+import time
+
+_memo = {}
+
+def slow(n):
+    if n not in _memo:
+        time.sleep(0.02)
+        _memo[n] = n * 2
+    return _memo[n]
+"""
+
+SLOW_INPUTS = {"slow": [[1], [2], [3], [0]]}
+
+
+@pytest.mark.parametrize("old, new", [
+    (SLOW_CACHED, SLOW_CACHED),          # lru_cache: hem eski hem yeni kodda
+    (SLOW_MANUAL_MEMO, SLOW_CACHED),     # modül düzeyinde memo sözlüğü (cache_clear ile temizlenemez)
+])
+def test_cache_is_reset_between_timing_repeats(old, new):
+    result = verify(old, new, SLOW_INPUTS, {"slow": "[7]"})
+    entry = result["benchmark"]["functions"][0]
+    assert result["passed"] is True, result
+    # Önbellek doğruluk testlerinde ve önceki tekrarlarda dolmuş olsa da her tekrar sıfırdan başlar.
+    assert entry["old_seconds"] >= 0.018
+    assert entry["new_seconds"] >= 0.018
+
+
+def test_lru_cache_fib_speedup_is_realistic():
+    naive = "def fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n"
+    cached = ("from functools import lru_cache\n\n@lru_cache(maxsize=None)\n" + naive)
+    result = verify(naive, cached, {"fib": [[0], [1], [10], [15]]}, {"fib": "[20]"})
+    bench = result["benchmark"]
+    # Önbellek boşken fib(20) ~20 çağrı yapar: mikro saniyeler mertebesinde, 0 değil.
+    assert bench["new_seconds"] >= MIN_RELIABLE_SECONDS
+    assert bench["speedup_is_lower_bound"] is False
+    assert 10 < bench["speedup"] < 20_000
+
+
+def test_speedup_guards_against_tiny_times():
+    assert _speedup(0.01, 0.0) == (pytest.approx(10_000), True)       # sıfıra bölünmez, alt sınır
+    assert _speedup(0.01, 2e-7) == (pytest.approx(10_000), True)
+    assert _speedup(0.01, 0.001) == (pytest.approx(10), False)
+    assert _speedup(5e-7, 1e-7) == (None, False)                      # ikisi de ölçülemeyecek kadar kısa
+    assert _speedup(None, 0.1) == (None, False)
+
+
+def test_summary_marks_lower_bound():
+    entry = {"function": "f", "old_seconds": 0.0074, "new_seconds": 2.9e-7, "outputs_equal": True, "error": None}
+    bench = _summarize_benchmark([entry])
+    assert bench["speedup"] == pytest.approx(7_400) and bench["speedup_is_lower_bound"] is True
+
+
+# --------------------------------------------------------------------------- #
+# LLM ölçüm girdisi vermezse: liste dışı argümanlarda en büyük test girdisi
+# --------------------------------------------------------------------------- #
+
+NAIVE_FIB = "def fib(n):\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n"
+ITER_FIB = "def fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n"
+
+
+def test_scalar_function_is_benchmarked_with_largest_test_input():
+    result = verify(NAIVE_FIB, ITER_FIB, {"fib": [[0], [1], [18], [5], [10]]})  # benchmark_input yok
+    bench = result["benchmark"]
+    assert bench is not None, "fib(n) için ölçüm yapılmalı"
+    entry = bench["functions"][0]
+    assert entry["auto"] is True and entry["error"] is None and entry["outputs_equal"] is True
+    assert "fib(*[18])" in entry["note"]
+    assert bench["speedup"] > 10  # O(2^N) -> O(N), n=18
+
+
+def test_largest_input_uses_all_scalar_arguments():
+    old = "def power(base, exp):\n    r = 1\n    for _ in range(exp):\n        r *= base\n    return r\n"
+    new = "def power(base, exp):\n    return base ** exp\n"
+    result = verify(old, new, {"power": [[2, 3], [3, 40], [10, 2], [5, 0]]})
+    assert "power(*[3, 40])" in result["benchmark"]["functions"][0]["note"]
+
+
+def test_largest_input_for_string_argument():
+    old = "def count_a(text):\n    n = 0\n    for ch in text:\n        if ch == 'a':\n            n += 1\n    return n\n"
+    new = "def count_a(text):\n    return text.count('a')\n"
+    result = verify(old, new, {"count_a": [["abc"], ["banana bandana"], [""], ["a"]]})
+    assert "count_a(*['banana bandana'])" in result["benchmark"]["functions"][0]["note"]
+
+
+def test_inputs_that_fail_in_original_are_not_used_for_benchmark():
+    old = "def inv(n):\n    return 1 / n\n"
+    result = verify(old, old, {"inv": [[0], [4], [2], [1]]})
+    entry = result["benchmark"]["functions"][0]
+    assert "inv(*[4])" in entry["note"] and entry["error"] is None
+
+
+def test_list_functions_still_use_generated_input():
+    result = verify(ORIGINAL, GREEN, TEST_INPUTS)  # find_pair, benchmark_input yok
+    entry = result["benchmark"]["functions"][0]
+    assert entry["auto"] is True
+    assert entry["note"] is None or "test girdilerinin en büyüğü" not in entry["note"]
+
+
+
+# --------------------------------------------------------------------------- #
+# Yan etki farkı: argümanların çağrı sonrası hâli kaydedilir
+# --------------------------------------------------------------------------- #
+
+PROCESS_QUEUE = """\
+def process_queue(tasks):
+    done = []
+    while tasks:
+        done.append(tasks.pop(0) * 2)
+    return done
+"""
+
+DEQUE_NO_CLEAR = """\
+from collections import deque
+def process_queue(tasks):
+    queue = deque(tasks)
+    done = []
+    while queue:
+        done.append(queue.popleft() * 2)
+    return done
+"""
+
+DEQUE_WITH_CLEAR = """\
+from collections import deque
+def process_queue(tasks):
+    queue = deque(tasks)
+    tasks.clear()
+    done = []
+    while queue:
+        done.append(queue.popleft() * 2)
+    return done
+"""
+
+QUEUE_INPUTS = {"process_queue": [[[1, 2, 3]], [[]], [[5]], [[4, 4, 1]]]}
+
+
+def test_side_effect_difference_records_argument_states():
+    result = verify(PROCESS_QUEUE, DEQUE_NO_CLEAR, QUEUE_INPUTS)
+    assert result["passed"] is False
+    case = result["cases"][0]
+    assert case["old"] == case["new"] == "[2, 4, 6]" and case["equal"] is False
+    assert case["side_effect"] == [{"name": "tasks", "before": "[1, 2, 3]", "old": "[]", "new": "[1, 2, 3]"}]
+    assert "`tasks`" in case["note"]
+    # Boş listede iki sürüm de argümanı değiştirmez: eşit.
+    assert next(c for c in result["cases"] if c["input"] == "[[]]")["equal"] is True
+    # Hata mesajı "sonuçlar farklı" değil, yan etki farkını söyler.
+    assert result["error"].startswith("Yan etki farkı")
+    assert "orijinalde [], yeni kodda [1, 2, 3]" in result["error"]
+
+
+def test_preserving_side_effect_passes():
+    result = verify(PROCESS_QUEUE, DEQUE_WITH_CLEAR, QUEUE_INPUTS)
+    assert result["passed"] is True, result
+    assert not any(c.get("side_effect") for c in result["cases"])
+
+
+def test_side_effect_names_the_changed_argument_among_several():
+    old = "def take(items, out):\n    out.extend(items)\n    return len(items)\n"
+    new = "def take(items, out):\n    return len(items)\n"
+    result = verify(old, new, {"take": [[[1, 2], []], [[3], [9]], [[], []], [[7, 8], [0]]]})
+    changes = result["cases"][0]["side_effect"]
+    assert [c["name"] for c in changes] == ["out"]
+    assert changes[0]["old"] == "[1, 2]" and changes[0]["new"] == "[]"
+
+
+def test_value_error_message_unchanged_when_outputs_differ():
+    wrong = "def process_queue(tasks):\n    return []\n"
+    result = verify(PROCESS_QUEUE, wrong, QUEUE_INPUTS)
+    assert result["passed"] is False
+    assert not (result["error"] or "").startswith("Yan etki farkı")
