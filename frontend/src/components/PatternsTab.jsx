@@ -125,7 +125,16 @@ function PatternForm({ pattern, onSave, onCancel }) {
   )
 }
 
-function PatternCard({ pattern, onUpdated }) {
+/** 401: oturum yok/süresi doldu -> yerel oturumu kapat ve anlaşılır mesaj göster. */
+function authMessage(err, onUnauthorized) {
+  if (err.status === 401) {
+    onUnauthorized?.()
+    return 'Yönetici oturumunun süresi doldu veya geçersiz; yeniden giriş yapın.'
+  }
+  return err.message
+}
+
+function PatternCard({ pattern, onUpdated, isAdmin, onUnauthorized }) {
   const [editing, setEditing] = useState(false)
   const [toggling, setToggling] = useState(false)
   const [error, setError] = useState(null)
@@ -136,14 +145,18 @@ function PatternCard({ pattern, onUpdated }) {
     try {
       onUpdated(await api.setPatternActive(pattern.code, isActive))
     } catch (e) {
-      setError(e.message)
+      setError(authMessage(e, onUnauthorized))
     } finally {
       setToggling(false)
     }
   }
 
   async function save(form) {
-    onUpdated(await api.updatePattern(pattern.code, form))
+    try {
+      onUpdated(await api.updatePattern(pattern.code, form))
+    } catch (e) {
+      throw new Error(authMessage(e, onUnauthorized))
+    }
     setEditing(false)
   }
 
@@ -153,15 +166,19 @@ function PatternCard({ pattern, onUpdated }) {
         <code className="pattern-code">{pattern.code}</code>
         <h3>{pattern.title}</h3>
         <ImpactBadge impact={pattern.impact} />
-        <ActiveSwitch pattern={pattern} onChange={toggle} disabled={toggling || editing} />
-        {!editing && (
+        {isAdmin ? (
+          <ActiveSwitch pattern={pattern} onChange={toggle} disabled={toggling || editing} />
+        ) : (
+          !pattern.is_active && <span className="badge status-inactive">Pasif</span>
+        )}
+        {isAdmin && !editing && (
           <button type="button" className="btn btn-secondary btn-small" onClick={() => setEditing(true)}>
             Düzenle
           </button>
         )}
       </header>
       {error && <p className="error-banner">{error}</p>}
-      {editing ? (
+      {editing && isAdmin ? (
         <PatternForm pattern={pattern} onSave={save} onCancel={() => setEditing(false)} />
       ) : (
         <>
@@ -181,14 +198,19 @@ function PatternCard({ pattern, onUpdated }) {
               <pre className="code-block after">{pattern.example_after}</pre>
             </figure>
           </div>
-          {pattern.updated_at && <p className="muted small">Son güncelleme: {formatDate(pattern.updated_at)}</p>}
+          {pattern.updated_at && (
+            <p className="muted small">
+              Son güncelleme: {formatDate(pattern.updated_at)}
+              {pattern.updated_by && ` · ${pattern.updated_by}`}
+            </p>
+          )}
         </>
       )}
     </article>
   )
 }
 
-export default function PatternsTab() {
+export default function PatternsTab({ isAdmin = false, onUnauthorized }) {
   const [patterns, setPatterns] = useState(null)
   const [error, setError] = useState(null)
 
@@ -205,13 +227,14 @@ export default function PatternsTab() {
     <div className="patterns">
       <p className="note" role="note">
         Desenlerin çözüm ve örnekleri buradan yönetilir. Yeni desen türleri için tespit kuralı eklenmesi gerekir.
+        {!isAdmin && ' Düzenlemek ve aktif/pasif yapmak için yönetici girişi yapın.'}
       </p>
       <p className="intro">
         Optimizasyon motoru yalnızca bu onaylı desenleri uygular. Her desen, statik analizde tespit edilen bir
         enerji israfı kalıbına karşılık gelir. Pasif desenler analizde raporlanmaz ve LLM'e gönderilmez.
       </p>
       {patterns.map((p) => (
-        <PatternCard key={p.code} pattern={p} onUpdated={replace} />
+        <PatternCard key={p.code} pattern={p} onUpdated={replace} isAdmin={isAdmin} onUnauthorized={onUnauthorized} />
       ))}
     </div>
   )

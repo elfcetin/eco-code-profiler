@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, llm, main
+from app import config, db, llm, main
 from app.patterns import EXAMPLE_INPUTS, PATTERNS_BY_CODE
 from app.main import app
 
@@ -79,7 +79,11 @@ def client(monkeypatch):
     monkeypatch.setattr(llm, "health_check", lambda: {
         "provider": "ollama", "model": "mock", "reachable": True, "message": "mock"
     })
+    monkeypatch.setattr(config, "ADMIN_PASSWORD", "test-sifresi")
     with TestClient(app) as c:
+        # Bu dosyadaki testler yönetici olarak çalışır; yetkilendirme test_admin.py'de.
+        token = c.post("/api/admin/login", json={"password": "test-sifresi"}).json()["token"]
+        c.headers["Authorization"] = f"Bearer {token}"
         yield c
 
 

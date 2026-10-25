@@ -3,22 +3,25 @@
 from __future__ import annotations
 
 import ast
+import logging
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from . import config, db, energy, llm, rag, report
+from . import auth, config, db, energy, llm, rag, report
 from .analyzer import analyze
 from .patterns import IMPACT_HIGH, IMPACT_LOW, IMPACT_MEDIUM
 from .verifier import verify
+
+logger = logging.getLogger("uvicorn.error")
 
 MAX_ATTEMPTS = 2  # ilk deneme + doğrulama başarısızsa 1 tekrar
 CLEAN_MESSAGE = "Algoritmik enerji israfı tespit edilmedi"
@@ -28,6 +31,8 @@ IMPACTS = (IMPACT_HIGH, IMPACT_MEDIUM, IMPACT_LOW)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not auth.enabled():
+        logger.warning("ADMIN_PASSWORD tanımlı değil: yönetici girişi ve desen düzenleme uçları KAPALI.")
     db.init_db()  # eksik tablo/sütunları oluştur, tabloda olmayan başlangıç desenlerini ekle (mevcutlara dokunmaz)
     yield
 
@@ -82,6 +87,10 @@ class EnergyRequest(BaseModel):
     new_seconds: float | None
     watts: float = Field(gt=0, le=100_000, description="İşlemci gücü varsayımı (W)")
     runs_per_day: float = Field(gt=0, le=1e12, description="Fonksiyonun günde kaç kez çalıştığı varsayımı")
+
+
+class AdminLogin(BaseModel):
+    password: str = Field(max_length=1_000)
 
 
 class PatternActive(BaseModel):
@@ -414,8 +423,28 @@ def patterns(session: Session = Depends(db.get_session)) -> list[dict]:
     return [row.to_api_dict() for row in rows]
 
 
+@app.get("/api/admin/status")
+def admin_status() -> dict:
+    return {"enabled": auth.enabled()}
+
+
+@app.post("/api/admin/login")
+def admin_login(req: AdminLogin) -> dict:
+    return auth.login(req.password)
+
+
+@app.post("/api/admin/logout", status_code=204)
+def admin_logout(authorization: str | None = Header(default=None)) -> None:
+    auth.logout(auth.bearer_token(authorization))
+
+
 @app.put("/api/patterns/{code}")
-def update_pattern(code: str, req: PatternUpdate, session: Session = Depends(db.get_session)) -> dict:
+def update_pattern(
+    code: str,
+    req: PatternUpdate,
+    session: Session = Depends(db.get_session),
+    user: str = Depends(auth.require_admin),
+) -> dict:
     pattern = _get_pattern(session, code)
     _validate_pattern_update(req)
     inputs = req.example_inputs if req.example_inputs is not None else pattern.example_inputs
@@ -427,6 +456,7 @@ def update_pattern(code: str, req: PatternUpdate, session: Session = Depends(db.
     if examples_changed:  # yalnızca metin/etki düzenlemelerinde alt süreç çalıştırılmaz
         _check_examples_equivalent(req.example_before, req.example_after, inputs)
     pattern.example_inputs = inputs
+    pattern.updated_by = user
     pattern.anti_pattern = req.anti_pattern.strip()
     pattern.solution = req.solution.strip()
     pattern.impact = req.impact
@@ -437,9 +467,15 @@ def update_pattern(code: str, req: PatternUpdate, session: Session = Depends(db.
 
 
 @app.patch("/api/patterns/{code}/active")
-def set_pattern_active(code: str, req: PatternActive, session: Session = Depends(db.get_session)) -> dict:
+def set_pattern_active(
+    code: str,
+    req: PatternActive,
+    session: Session = Depends(db.get_session),
+    user: str = Depends(auth.require_admin),
+) -> dict:
     pattern = _get_pattern(session, code)
     pattern.is_active = req.is_active
+    pattern.updated_by = user
     session.commit()
     return pattern.to_api_dict()
 

@@ -77,6 +77,8 @@ services:
       LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
       CPU_POWER_WATTS: ${CPU_POWER_WATTS:-65}
       RUNS_PER_DAY: ${RUNS_PER_DAY:-10000}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      ADMIN_TOKEN_HOURS: ${ADMIN_TOKEN_HOURS:-8}
     ports:
       - "8000:8000"
     # Kullanıcı kodu bu container içinde (alt süreçte) çalıştırıldığı için sıkılaştırma:

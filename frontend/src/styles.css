@@ -153,6 +153,56 @@ button {
   color: var(--muted);
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.admin-controls {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-badge {
+  color: var(--accent-text);
+  background: var(--accent);
+}
+
+.admin-login {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 10;
+  width: min(280px, calc(100vw - 32px));
+  gap: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.admin-login label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.admin-login input {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.status-inactive {
+  color: var(--low);
+  background: var(--low-soft);
+}
+
 .health {
   display: inline-flex;
   align-items: center;

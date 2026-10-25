@@ -173,8 +173,10 @@ Desenlerin tam metni ve önce/sonra örnekleri arayüzdeki **Yeşil Kod Desenler
 Gereksinim: Docker ve Docker Compose v2.
 
 ```bash
-docker compose up -d --build
+ADMIN_PASSWORD=kendi-sifreniz docker compose up -d --build
 ```
+
+`ADMIN_PASSWORD` desen düzenleme için yönetici şifresidir; istediğiniz bir şifreyi yazın. Verilmezse uygulama yine çalışır (analiz, optimizasyon, geçmiş, rapor), yalnızca desen düzenleme kapalı kalır. Bkz. [Yönetici girişi](#yönetici-girişi).
 
 - Arayüz: <http://localhost:8000>
 - API belgeleri (Swagger): <http://localhost:8000/docs>
@@ -214,8 +216,10 @@ python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-uvicorn app.main:app --reload  # http://localhost:8000
+ADMIN_PASSWORD=kendi-sifreniz uvicorn app.main:app --reload  # http://localhost:8000
 ```
+
+`ADMIN_PASSWORD` desen düzenleme için yönetici şifresidir; istediğiniz bir şifreyi yazın (ayrıntı: [Yönetici girişi](#yönetici-girişi)). Şifresiz başlatılırsa uygulama çalışır, ama açılışta uyarı verilir ve desen düzenleme kapalı kalır.
 
 `DATABASE_URL` verilmezse `backend/eco_profiler.db` adlı bir SQLite dosyası kullanılır. Tablolar ve desen verisi ilk açılışta otomatik oluşturulur.
 
@@ -240,6 +244,16 @@ npm test                       # arayüz testleri (Vitest + Testing Library)
 Geliştirme sunucusu `/api` isteklerini Vite proxy üzerinden `http://localhost:8000` adresine yönlendirir.
 
 Tek sunucuyla çalıştırmak için önce `npm run build` komutunu çalıştırın. Backend, `frontend/dist` klasörü varsa onu kök adresten (<http://localhost:8000>) sunar. Bu kontrol backend açılırken yapıldığından, build sonrası backend'i yeniden başlatın.
+
+### Yönetici girişi
+
+Desenleri düzenlemek ve aktif/pasif yapmak yönetici şifresi gerektirir; diğer her şey herkese açıktır.
+
+1. Backend'i bir şifreyle başlatın: `ADMIN_PASSWORD=kendi-sifreniz uvicorn app.main:app --reload` (Docker'da `ADMIN_PASSWORD=kendi-sifreniz docker compose up -d`). Kalıcı olması için şifreyi `backend/.env` dosyasına yazıp [ortam değişkenleri](#ortam-değişkenleri) bölümündeki gibi yükleyebilirsiniz.
+2. Arayüzde üst bardaki **Yönetici girişi** düğmesine tıklayıp aynı şifreyi girin.
+3. Üst barda **Yönetici modu** rozeti görünür; Desenler sekmesinde **Düzenle** ve aktif/pasif kontrolleri açılır. Oturum 8 saat sonra (`ADMIN_TOKEN_HOURS`) ya da **Çıkış** ile kapanır.
+
+Projeyle hiçbir şifre gelmez: her kurulum kendi şifresini belirler. Kodda veya `.env.example`'da varsayılan şifre yoktur.
 
 ### Kapalı ağ (air-gapped) kurulumu
 
@@ -281,6 +295,8 @@ Değişkenler `backend/app/config.py` tarafından okunur. Örnek dosya: `backend
 | `LLM_TIMEOUT`    | `300`                               | Tek bir LLM isteği için zaman aşımı (saniye) |
 | `CPU_POWER_WATTS` | `65`                               | Enerji **tahmini** varsayımı: işlemcinin çalışırken çektiği güç (W). Arayüzde sonuç başına değiştirilebilir |
 | `RUNS_PER_DAY`   | `10000`                             | Enerji **tahmini** varsayımı: optimize edilen fonksiyonun günde kaç kez çalıştığı |
+| `ADMIN_PASSWORD` | — (tanımsız)                        | Yönetici şifresi. Desen düzenleme ve aktif/pasif yapma yalnızca bu şifreyle giriş yapan yönetici içindir. **Tanımlı değilse** açılışta uyarı verilir ve düzenleme uçları kapalıdır (403). Kodda varsayılan şifre yoktur; gerçek şifreyi `.env` dosyasına yazın, commit'lemeyin |
+| `ADMIN_TOKEN_HOURS` | `8`                              | Yönetici oturumunun (token) geçerlilik süresi (saat) |
 
 Backend `.env` dosyasını **kendiliğinden okumaz**. Yerel geliştirmede değişkenleri kabukta tanımlayın:
 
@@ -333,8 +349,11 @@ Tüm uçlar `/api` altındadır. Etkileşimli belgeler için `/docs` adresine ba
 |--------|-----------------|----------|
 | GET    | `/api/health`   | Veritabanı durumu, seçili LLM sağlayıcısı/modeli ve erişilebilirliği. Her iki bileşen de çalışıyorsa `status` alanı `"ok"`, değilse `"degraded"` olur; HTTP kodu her durumda 200'dür. |
 | GET    | `/api/patterns` | Yeşil Kod Desenleri listesi (`is_active`, `updated_at` dahil) |
-| PUT    | `/api/patterns/{code}` | Desenin `anti_pattern`, `solution`, `impact`, `example_before`, `example_after` alanlarını günceller. Başlık değiştirilemez. İsteğe bağlı `example_inputs` ile test girdileri de güncellenir (verilmezse kayıtlı girdiler kullanılır). Geçersiz etki düzeyi (`yüksek`/`orta`/`düşük` dışında), boş metin, sözdizimi hatalı örnek, örnekte olmayan fonksiyona ait test girdisi veya **eşdeğer olmayan önce/sonra örneği** → **400**; bilinmeyen kod → 404 |
-| PATCH  | `/api/patterns/{code}/active` | `{"is_active": true\|false}` ile deseni aktif/pasif yapar; bilinmeyen kod → 404 |
+| GET    | `/api/admin/status` | `{"enabled": bool}`: sunucuda `ADMIN_PASSWORD` tanımlı mı |
+| POST   | `/api/admin/login` | `{"password": "..."}` → `{token, user, expires_at}` (süreli). Yanlış şifre → 401; şifre tanımlı değilse → 403 |
+| POST   | `/api/admin/logout` | Token'ı geçersiz kılar (204) |
+| PUT    | `/api/patterns/{code}` | 🔒 **Yönetici** (`Authorization: Bearer <token>`; yoksa/süresi dolduysa 401). Desenin `anti_pattern`, `solution`, `impact`, `example_before`, `example_after` alanlarını günceller. Başlık değiştirilemez. İsteğe bağlı `example_inputs` ile test girdileri de güncellenir (verilmezse kayıtlı girdiler kullanılır). Geçersiz etki düzeyi (`yüksek`/`orta`/`düşük` dışında), boş metin, sözdizimi hatalı örnek, örnekte olmayan fonksiyona ait test girdisi veya **eşdeğer olmayan önce/sonra örneği** → **400**; bilinmeyen kod → 404 |
+| PATCH  | `/api/patterns/{code}/active` | 🔒 **Yönetici.** `{"is_active": true\|false}` ile deseni aktif/pasif yapar; bilinmeyen kod → 404 |
 | POST   | `/api/analyze`  | Yalnızca AST analizi; LLM kullanmaz, hızlıdır |
 | POST   | `/api/optimize` | Analiz → LLM ile yeniden yazım → doğrulama → kayıt |
 | GET    | `/api/history`  | Son 20 çalıştırma (en yeni önce) |
@@ -482,4 +501,9 @@ Notlar:
   - Örnek düzenlemelerinde eşdeğerlik yalnızca kayıtlı test girdilerinde (ve doğrulayıcının bunlardan türettiği sıralı/ters/rastgele girdilerde) kontrol edilir; bir kanıt değildir. Zayıf girdilerle (ör. tekrarsız listeler) eşdeğer olmayan bir örnek geçebilir. "Sonra" örneğinin gerçekten daha verimli olduğu ve deseni gerçekten uyguladığı kontrol edilmez.
   - Geçmiş kayıtlarındaki bulgular, analiz anındaki desen ayarlarıyla saklanır; sonradan pasif yapılan bir desen eski kayıtlarda görünmeye devam eder.
 - **Başarısız öneriler API yanıtında yer alır.** Arayüz başarısız kodu "Önerilmez" olarak işaretler ve kopyalanmasını engeller, ancak kod `/api/optimize` ve `/api/history` yanıtlarında bulunur. API'yi doğrudan kullanan istemciler `status` alanını kontrol etmelidir.
-- **Kimlik doğrulama yoktur.** Panel, güvenilir bir iç ağda kullanılmak üzere tasarlanmıştır. Panele erişen herkes desenleri düzenleyebilir ve pasif yapabilir. Dışarıya açılacaksa önüne kimlik doğrulama yapan bir ters vekil (reverse proxy) konulmalıdır.
+- **Yetkilendirme basittir; tam bir kullanıcı sistemi değildir.**
+  - Desen düzenleme ve aktif/pasif yapma, tek bir yönetici şifresiyle (`ADMIN_PASSWORD`) korunur. Üst bardaki **Yönetici girişi** ile süreli (varsayılan 8 saat) bir token alınır; düzenleme uçları (`PUT /api/patterns/{code}`, `PATCH /api/patterns/{code}/active`) bu token olmadan 401 döner. Okuma uçları ve analiz/optimizasyon herkese açıktır.
+  - Kullanıcı hesabı yoktur; değişikliği yapan `updated_by` alanında "admin" olarak kaydedilir.
+  - Tokenlar sunucu belleğinde tutulur: backend yeniden başlatılınca geçersiz olur (yeniden giriş gerekir) ve birden çok worker süreciyle (ör. `uvicorn --workers 4`) çalışmaz.
+  - Giriş denemelerinde hız sınırı (rate limit) yoktur. Arayüz token'ı tarayıcının `localStorage`'ında tutar.
+  - Panel, güvenilir bir iç ağda kullanılmak üzere tasarlanmıştır. Dışarıya açılacaksa HTTPS ve önüne kimlik doğrulama yapan bir ters vekil (reverse proxy) konulmalıdır.

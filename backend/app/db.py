@@ -74,6 +74,7 @@ class GreenPattern(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
     # Örneklerin eşdeğerlik kontrolü için test girdileri: {fonksiyon: [[argümanlar], ...]}
     example_inputs: Mapped[dict | None] = mapped_column(NullableJSON, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(64), nullable=True)  # düzenleyen (şimdilik "admin")
     updated_at: Mapped[datetime | None] = mapped_column(
         UTCDateTime(), default=_utcnow, onupdate=_utcnow
     )
@@ -96,6 +97,7 @@ class GreenPattern(Base):
             **self.to_dict(),
             "is_active": self.is_active,
             "updated_at": iso_utc(self.updated_at),
+            "updated_by": self.updated_by,
             "example_inputs": self.example_inputs,
         }
 
@@ -170,6 +172,8 @@ def _add_missing_columns(bind: Engine) -> None:
         statements.append(f"ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT {true}")
     if "updated_at" not in columns:
         statements.append(f"ADD COLUMN updated_at {table.c.updated_at.type.compile(dialect=bind.dialect)}")
+    if "updated_by" not in columns:
+        statements.append(f"ADD COLUMN updated_by {table.c.updated_by.type.compile(dialect=bind.dialect)}")
     if "example_inputs" not in columns:
         statements.append(f"ADD COLUMN example_inputs {table.c.example_inputs.type.compile(dialect=bind.dialect)}")
     if statements:

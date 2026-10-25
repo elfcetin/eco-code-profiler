@@ -47,7 +47,7 @@ afterEach(() => {
 
 describe('PatternsTab', () => {
   it('yönetim notunu gösterir, pasif desen soluk görünür', async () => {
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
     expect(screen.getByText(/Yeni desen türleri için tespit kuralı eklenmesi gerekir/)).toBeTruthy()
     expect(card('YK-01').classList.contains('inactive')).toBe(false)
@@ -57,7 +57,7 @@ describe('PatternsTab', () => {
 
   it('Düzenle → form; Kaydet API çağırır ve kartı günceller', async () => {
     vi.mocked(api.updatePattern).mockImplementation(async (code, form) => ({ ...PATTERNS[0], ...form }))
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
 
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
@@ -79,7 +79,7 @@ describe('PatternsTab', () => {
   })
 
   it('İptal değişiklikleri atar', async () => {
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
     fireEvent.change(within(card('YK-01')).getByLabelText('Çözüm'), { target: { value: 'Vazgeçilen' } })
@@ -92,7 +92,7 @@ describe('PatternsTab', () => {
 
   it('sunucu 400 dönerse hata formda gösterilir', async () => {
     vi.mocked(api.updatePattern).mockRejectedValue(new Error('İstek başarısız: Çözüm boş olamaz.'))
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Kaydet' }))
@@ -103,7 +103,7 @@ describe('PatternsTab', () => {
 
   it('aktif/pasif anahtarı API çağırır ve kartı soluklaştırır', async () => {
     vi.mocked(api.setPatternActive).mockResolvedValue({ ...PATTERNS[0], is_active: false })
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
 
     fireEvent.click(within(card('YK-01')).getByRole('switch'))
@@ -114,7 +114,7 @@ describe('PatternsTab', () => {
 
   it('test girdileri okunabilir JSON olarak gelir ve düzenlenebilir', async () => {
     vi.mocked(api.updatePattern).mockImplementation(async (code, form) => ({ ...PATTERNS[0], ...form }))
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
     const field = within(card('YK-01')).getByLabelText('Test girdileri (JSON)')
@@ -131,7 +131,7 @@ describe('PatternsTab', () => {
     ['[[1]]', 'biçiminde olmalı'],
     ['{"f": [1, 2]}', 'biçiminde olmalı'],
   ])('geçersiz test girdisi (%s) sunucuya gönderilmez', async (text, message) => {
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
     fireEvent.change(within(card('YK-01')).getByLabelText('Test girdileri (JSON)'), { target: { value: text } })
@@ -144,12 +144,40 @@ describe('PatternsTab', () => {
     vi.mocked(api.updatePattern).mockRejectedValue(
       new Error("İstek başarısız: 'Sonra' örneği 'önce' örneğiyle eşdeğer değil: common(*[[1, 1]]) için önce [1, 1], sonra [1]."),
     )
-    render(<PatternsTab />)
+    render(<PatternsTab isAdmin />)
     await screen.findByText('YK-01')
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Düzenle' }))
     fireEvent.click(within(card('YK-01')).getByRole('button', { name: 'Kaydet' }))
     expect(await screen.findByText(/eşdeğer değil: common/)).toBeTruthy()
     expect(within(card('YK-01')).getByRole('button', { name: 'Kaydet' })).toBeTruthy()
+  })
+
+  it('giriş yapılmadıysa salt okunur: Düzenle ve anahtar yok, pasif desen etiketle gösterilir', async () => {
+    render(<PatternsTab />)
+    await screen.findByText('YK-01')
+    expect(screen.queryByRole('button', { name: 'Düzenle' })).toBeNull()
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(within(card('YK-02')).getByText('Pasif')).toBeTruthy()
+    expect(card('YK-02').classList.contains('inactive')).toBe(true)
+    expect(screen.getByText(/yönetici girişi yapın/)).toBeTruthy()
+  })
+
+  it('son güncelleme tarihini ve düzenleyeni gösterir', async () => {
+    vi.mocked(api.patterns).mockResolvedValue([{ ...PATTERNS[0], updated_by: 'admin' }, PATTERNS[1]])
+    render(<PatternsTab />)
+    await screen.findByText('YK-01')
+    expect(within(card('YK-01')).getByText(/Son güncelleme: 24\.10\.2026 13:00 · admin/)).toBeTruthy()
+  })
+
+  it('401 (süresi dolmuş oturum) yerel oturumu kapatır ve mesaj gösterir', async () => {
+    const expired = Object.assign(new Error('İstek başarısız: Yönetici oturumunun süresi doldu'), { status: 401 })
+    vi.mocked(api.setPatternActive).mockRejectedValue(expired)
+    const onUnauthorized = vi.fn()
+    render(<PatternsTab isAdmin onUnauthorized={onUnauthorized} />)
+    await screen.findByText('YK-01')
+    fireEvent.click(within(card('YK-01')).getByRole('switch'))
+    expect(await screen.findByText(/süresi doldu veya geçersiz; yeniden giriş yapın/)).toBeTruthy()
+    expect(onUnauthorized).toHaveBeenCalled()
   })
 })
 

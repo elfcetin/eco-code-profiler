@@ -7,6 +7,8 @@ import ResultView, { analysisOf } from './components/ResultView.jsx'
 import PatternsTab from './components/PatternsTab.jsx'
 import HistoryTab from './components/HistoryTab.jsx'
 import ReportTab from './components/ReportTab.jsx'
+import AdminControls from './components/AdminControls.jsx'
+import { useAdminSession } from './adminSession.js'
 
 const TABS = [
   ['analysis', 'Analiz'],
@@ -72,6 +74,7 @@ export default function App() {
   const [error, setError] = useState(null)
   const [focus, setFocus] = useState(null)
   const health = useHealth()
+  const admin = useAdminSession()
   const elapsed = useElapsed(loading)
 
   // Vurgular yalnızca sonuç, editördeki kodun kendisine aitse gösterilir.
@@ -127,9 +130,12 @@ export default function App() {
             <div className="brand-sub">Algoritmik enerji israfı analizi</div>
           </div>
         </div>
-        <div className={`health health-${health.state}`} title={health.detail}>
-          <span className="dot" aria-hidden="true" />
-          <span>{health.label}</span>
+        <div className="topbar-right">
+          <div className={`health health-${health.state}`} title={health.detail}>
+            <span className="dot" aria-hidden="true" />
+            <span>{health.label}</span>
+          </div>
+          <AdminControls admin={admin} />
         </div>
       </header>
 
@@ -194,7 +200,7 @@ export default function App() {
             )}
           </>
         )}
-        {tab === 'patterns' && <PatternsTab />}
+        {tab === 'patterns' && <PatternsTab isAdmin={admin.isAdmin} onUnauthorized={admin.expire} />}
         {tab === 'history' && <HistoryTab onLoadRun={openRun} />}
         {tab === 'report' && <ReportTab onLoadRun={openRun} />}
       </main>
