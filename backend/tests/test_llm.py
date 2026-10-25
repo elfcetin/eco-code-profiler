@@ -299,3 +299,9 @@ def test_real_syntax_error_is_not_repaired():
 def test_prompt_asks_for_worst_case_benchmark_input():
     prompt = llm.build_prompt(ORIGINAL, FINDINGS, PATTERNS)
     assert "eşleşmenin HİÇ" in prompt and "ulaşılamayan bir hedef değer" in prompt
+
+
+def test_prompt_forbids_changing_regex_and_constants():
+    prompt = llm.build_prompt(ORIGINAL, FINDINGS, PATTERNS)
+    assert "Regex desenlerini, sabitleri" in prompt and "regex'in kendisini değiştirme" in prompt
+

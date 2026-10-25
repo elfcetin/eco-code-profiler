@@ -243,6 +243,26 @@ def _multiplicity_hint(cases: list[dict]) -> str:
     )
 
 
+def _slower_than_original(verification: dict) -> tuple[str, str] | None:
+    """Doğru ama ölçümde eski koddan YAVAŞ çıkan kod optimizasyon sayılmaz: (hata, geri bildirim).
+
+    Eşdeğerlik testi yalnızca doğruluğu gösterir; "optimize edildi" denebilmesi için ölçülen
+    hızlanma en az 1× olmalı. Ölçüm yoksa (None) burada karar verilmez.
+    """
+    bench = verification.get("benchmark") or {}
+    speedup = bench.get("speedup")
+    if speedup is None or speedup >= 1.0:
+        return None
+    old, new = bench.get("old_seconds"), bench.get("new_seconds")
+    return (
+        f"Önerilen kod doğru ama ölçümde eski koddan yavaş ({speedup:.2f}×); optimizasyon sayılmadı.",
+        f"Önceki kodun doğru (eşdeğerlik testini geçti) ama ölçümde eski koddan YAVAŞ: {speedup:.2f}× "
+        f"(eski {old:.6f} sn, yeni {new:.6f} sn). Gereksiz dönüşüm/kopya (ör. her çağrıda yeni veri "
+        "yapısı kurmak) ek yük getiriyor olabilir. Daha hızlı bir çözüm üret; desen bu kodda kazanç "
+        "sağlamıyorsa notes alanında açıkla.",
+    )
+
+
 def _verification_feedback(verification: dict, green_code: str | None = None) -> str:
     """Başarısız doğrulamayı LLM'e geri bildirim olarak özetler."""
     lines = ["Önceki optimize edilmiş kod doğrulamadan GEÇEMEDİ."]
@@ -456,6 +476,7 @@ def optimize_code(req: CodeRequest, session: Session = Depends(db.get_session)) 
     error: str | None = None
     attempts = 0
 
+    accepted = False  # doğrulandı VE (ölçüldüyse) eski koddan yavaş değil
     while attempts < MAX_ATTEMPTS:
         attempts += 1
         try:
@@ -476,12 +497,16 @@ def optimize_code(req: CodeRequest, session: Session = Depends(db.get_session)) 
             continue
         verification = verify(code, candidate["green_code"], candidate["test_inputs"], candidate["benchmark_input"])
         if verification["passed"]:
-            error = None
-            break
+            slower = _slower_than_original(verification)
+            if slower is None:
+                accepted, error = True, None
+                break
+            error, feedback = slower
+            continue
         error = verification.get("error") or "Optimize edilmiş kod orijinalle aynı sonuçları vermedi."
         feedback = _verification_feedback(verification, candidate["green_code"])
 
-    passed = bool(verification and verification["passed"])
+    passed = accepted
     green_code = result["green_code"] if result else None
     bench = (verification or {}).get("benchmark") or {}
     response = OptimizeResponse(

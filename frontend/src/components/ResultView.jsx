@@ -12,6 +12,10 @@ import {
 const CLEAN_TITLE = 'İsraf tespit edilmedi'
 const OPTIMIZED_TITLE = 'Optimize edildi ve doğrulandı'
 const FAILED_TITLE = 'Doğrulanmış optimizasyon üretilemedi'
+// Doğru olduğu doğrulandı ama süre ölçülemedi: kazanç kanıtlanmadığı için "optimize edildi" denmez.
+const UNMEASURED_TITLE = 'Doğrulandı, hızlanma ölçülemedi'
+const UNMEASURED_TEXT =
+  'Davranışın korunduğu doğrulandı, ancak performans ölçülemediği için hız kazancı kanıtlanmadı.'
 
 /** Sonucun statik analiz kısmı. Geçmiş kayıtlarında yalnızca bulgular saklanır. */
 export function analysisOf({ kind, data }) {
@@ -23,11 +27,15 @@ export function analysisOf({ kind, data }) {
 /** Geçmişten yüklenen kayıt: aynı kurallar (başarısızsa kod önerilmez, kopyalanamaz). */
 function HistoryResult({ code, run, onSelectLine }) {
   const failed = run.status === 'failed'
-  const title = { clean: CLEAN_TITLE, optimized: OPTIMIZED_TITLE }[run.status] ?? FAILED_TITLE
+  const unmeasured = run.status === 'optimized' && run.speedup == null
+  const title = unmeasured
+    ? UNMEASURED_TITLE
+    : ({ clean: CLEAN_TITLE, optimized: OPTIMIZED_TITLE }[run.status] ?? FAILED_TITLE)
   return (
     <div className="results">
-      <StatusCard tone={failed ? 'bad' : 'ok'} title={title}>
+      <StatusCard tone={failed ? 'bad' : unmeasured ? 'info' : 'ok'} title={title}>
         {failed && 'Doğrulanmış bir optimizasyon üretilemedi; orijinal kodu kullanmaya devam edin. '}
+        {unmeasured && `${UNMEASURED_TEXT} `}
         Geçmiş kaydı ({formatDate(run.created_at)}). Ayrıntılı doğrulama tablosu saklanmaz; yeniden
         doğrulamak için “Optimize Et”i kullanın.
       </StatusCard>
@@ -88,13 +96,14 @@ export default function ResultView({ result, onSelectLine }) {
   }
 
   const optimized = data.status === 'optimized'
+  const unmeasured = optimized && data.verification?.benchmark?.speedup == null
   return (
     <div className="results">
       <StatusCard
-        tone={optimized ? 'ok' : 'bad'}
-        title={optimized ? OPTIMIZED_TITLE : FAILED_TITLE}
+        tone={!optimized ? 'bad' : unmeasured ? 'info' : 'ok'}
+        title={!optimized ? FAILED_TITLE : unmeasured ? UNMEASURED_TITLE : OPTIMIZED_TITLE}
       >
-        {data.message}
+        {unmeasured ? UNMEASURED_TEXT : data.message}
         {data.attempts > 1 && ` (${data.attempts} deneme)`}
         {!optimized && data.error && <div className="error-text">{data.error}</div>}
       </StatusCard>

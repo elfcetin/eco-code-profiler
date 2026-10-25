@@ -78,6 +78,10 @@ LLM çıktısına güvenilmez; her yeniden yazım önce süzülür, sonra yalıt
 - Hangi desenin hangi satırda kaldığı LLM'e geri bildirim olarak gönderilir ve bir kez daha denenir.
 - Kısmi ilerleme (ör. YK-01 ve YK-02'den yalnızca YK-02'nin giderilmesi) kabul edilir ve eşdeğerlik testine geçer.
 
+**1c. Yalnızca desen uygulanır.** LLM'e regex desenlerini, sabitleri, metin biçimlerini ve kenar durum davranışını aynen koruması söylenir. Değerlendirmede model, döngüdeki `re.compile`'ı dışarı almak yerine regex'i "daha iyi" bir regex'le değiştirmiş ve bu değişiklik doğrulamadan kaçmıştı.
+
+**Kabul kuralı.** Bir öneri ancak eşdeğerlik testinden geçerse **ve** ölçümde eski koddan yavaş değilse (hızlanma ≥ 1×) "optimize edildi" sayılır. Doğru ama yavaş kod reddedilir ve LLM'e "kodun doğru ama daha yavaş" geri bildirimi gönderilir. Doğru olduğu doğrulanan ama süresi ölçülemeyen sonuçlar arayüzde "Doğrulandı, hızlanma ölçülemedi" olarak gösterilir; hız kazancı iddia edilmez.
+
 **2. Eşdeğerlik testi** (`verifier.py`). Her fonksiyon şu girdilerle hem eski hem yeni kodda, `deepcopy`'lenmiş argümanlarla çağrılır:
 
 - LLM'in ürettiği test girdileri (en az 4),
@@ -409,6 +413,36 @@ Her bulgu şu alanları içerir: `line`, `pattern_code`, `title`, `detail` (Tür
 - Sözdizimi hatalı kodda LLM çağrılmaz ve `status="failed"` döner. Hata, `error` alanında satır numarasıyla belirtilir.
 
 ---
+
+## Değerlendirme (görülmemiş kodlar)
+
+Sistem, geliştirme sırasında hiç görülmemiş 20 kodla (10 desen × 2) ölçüldü: [`backend/eval/cases.py`](backend/eval/cases.py). Set, sonuçlara bakılmadan önce donduruldu. Her kodun LLM'in ve doğrulayıcının görmediği **gizli testleri** var (tekrarlar, kenar durumlar, büyük girdiler). "Optimize edildi" denen her sonuç bu testlerle bağımsız olarak denetlenir. Çalıştırma, kullanıcının verisini etkilememek için ayrı ve geçici bir veritabanıyla yapılır:
+
+```bash
+cd backend
+.venv/bin/python eval/run_eval.py --runs 3   # Ollama çalışırken; ~45 dk, sonuçlar eval/results/
+```
+
+**Sonuç** (`qwen2.5-coder:7b`, Apple M1 Pro, 20 kod × 3 = 60 optimizasyon; [`eval/results/`](backend/eval/results/)):
+
+| Ölçü | Sonuç |
+|---|---|
+| Doğru (gizli testleri geçen) **ve** ölçümde hızlanan öneri | **22/60 (%37)**; 8'inde ≥10× (en yüksek 278×), medyan 2,3× |
+| Doğru ama hızlanması ölçülemeyen | 10/60 |
+| Doğru ama ölçümde daha yavaş (yeni kabul kuralıyla artık reddedilir) | 4/60 |
+| Başarısız (sistem doğrulanmış öneri üretemedi; orijinal kod korunur) | 20/60 |
+| Desen bulunamadı (analizci `count_word`'de YK-10'u kaçırdı; LLM çağrılmadı) | 3/60 |
+| **Yanlış onay** (doğrulandı dendi, gizli testler kaldı) | **1/60** |
+| Beklenen desenin tespiti | 57/60 |
+| Medyan süre / optimizasyon | 15 sn |
+
+Desene göre: YK-01–YK-04 (iç içe döngü, listede arama, string birleştirme, döngüde `len`) 24/24 doğru. Özyineleme (YK-06, 0/6), çift toplamı (YK-05, 2/6) ve sıralama/kuyruk (YK-07, YK-08, 3/6) gibi anlamı ince dönüşümlerde 7B model zayıf kalıyor.
+
+Notlar:
+- Bu ölçüm, "yavaş kodu reddetme" ve "regex/sabitleri koruma" kurallarından **önce** yapıldı. Tablodaki ilk satır, kabul kuralı mevcut verilere uygulanarak hesaplandı. Yeni kuralların etkisi henüz yeniden ölçülmedi.
+- Tek yanlış onayda model e-posta regex'ini değiştirmişti (`a@b` gibi adresler bulunmuyordu). Bu durum, doğrulayıcının metin girdilerde yeni test girdisi üretemediğini gösteriyor.
+- Analizci `count_word` kodunda YK-10'u kaçırdı: `re.escape(word)` çağrısı nedeniyle `word`'ün döngüde değişebileceğini varsayıyor.
+- 3 çalıştırmada `total_price` 300 sn LLM zaman aşımına düştü; sebebi incelenmedi.
 
 ## Sınırlar
 

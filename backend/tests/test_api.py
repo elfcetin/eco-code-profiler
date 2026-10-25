@@ -642,3 +642,37 @@ def test_order_only_difference_does_not_get_repeat_hint(client, monkeypatch):
     client.post("/api/optimize", json={"code": FIND_DUPLICATES})
     assert "TEKRAR SAYILARI" not in fake.calls[1]["feedback"]
 
+
+# --------------------------------------------------------------------------- #
+# Doğru ama ölçümde YAVAŞ kod optimizasyon sayılmaz
+# --------------------------------------------------------------------------- #
+
+LABEL = "def label(items):\n    out = []\n    for item in items:\n        out.append(f\"{item}/{len(items)}\")\n    return out\n"
+LABEL_FAST = "def label(items):\n    n = len(items)\n    return [f\"{item}/{n}\" for item in items]\n"
+# Desen giderildi ve sonuç doğru, ama her çağrı 20 ms bekliyor: ölçümde daha yavaş.
+LABEL_SLOW = "import time\n\ndef label(items):\n    time.sleep(0.02)\n    n = len(items)\n    return [f\"{item}/{n}\" for item in items]\n"
+
+
+def label_result(green_code: str) -> dict:
+    return {**llm_result(green_code), "changes": [{"pattern": "YK-04", "explanation": "len dışarı"}],
+            "test_inputs": {"label": [[["a", "b"]], [[]], [["x"]], [[1, 2, 3]]]},
+            "benchmark_input": {"label": "[[random.randint(0, 9) for _ in range(200)]]"}}
+
+
+def test_slower_code_is_retried_with_feedback(client, monkeypatch):
+    fake = use_llm(monkeypatch, label_result(LABEL_SLOW), label_result(LABEL_FAST))
+    body = client.post("/api/optimize", json={"code": LABEL}).json()
+    feedback = fake.calls[1]["feedback"]
+    assert "eski koddan YAVAŞ" in feedback and "eşdeğerlik testini geçti" in feedback
+    assert body["status"] == "optimized" and body["attempts"] == 2
+    assert body["verification"]["benchmark"]["speedup"] >= 1
+
+
+def test_slower_code_twice_is_failed_not_optimized(client, monkeypatch):
+    use_llm(monkeypatch, label_result(LABEL_SLOW), label_result(LABEL_SLOW))
+    body = client.post("/api/optimize", json={"code": LABEL}).json()
+    assert body["status"] == "failed"
+    assert body["verification"]["passed"] is True  # eşdeğerlik geçti; tabloda "Geçti" görünür
+    assert body["error"].startswith("Önerilen kod doğru ama ölçümde eski koddan yavaş")
+    assert body["energy"] is None
+

@@ -37,6 +37,9 @@ Kurallar:
 - green_code, orijinal koddaki tüm fonksiyonları AYNI ad ve imzayla içermeli; gereken importları eklemeli.
   Parametre adlarını AYNEN koru; desen örneklerindeki adları (ör. nums, items) kopyalama.
 - changes: yalnızca gerçekten uyguladığın desenleri listele.
+- Yalnızca tespit edilen desenleri uygula; başka hiçbir şeyi "iyileştirme". Regex desenlerini, sabitleri,
+  metin biçimlerini, yuvarlama/biçimlendirmeyi ve kenar durum davranışını (boş girdi, hata fırlatma) AYNEN koru.
+  Örneğin döngüdeki re.compile'ı dışarı alırken regex'in kendisini değiştirme.
 - test_inputs: her fonksiyon için EN AZ 4 girdi ver; en az biri boş/kenar durum olsun (ör. boş liste, tek eleman).
   Her girdi, fonksiyonun argümanlarını SIRAYLA içeren bir listedir; eleman sayısı argüman sayısına EŞİT olmalı.
   Örnekler:

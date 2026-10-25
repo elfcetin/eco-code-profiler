@@ -119,3 +119,29 @@ describe('Eşdeğerlik tablosu: yan etki farkı', () => {
     expect(row.querySelector('[aria-label="yan etki farkı"]').textContent).toContain('yan etki')
   })
 })
+
+describe('Hızlanması ölçülemeyen doğrulanmış sonuç', () => {
+  it('"optimize edildi" yerine "hızlanma ölçülemedi" der', () => {
+    const result = optimizeResult('optimized')
+    result.data.verification = { passed: true, cases: [], benchmark: null }
+    render(<ResultView result={result} onSelectLine={() => {}} />)
+    expect(screen.getByText('Doğrulandı, hızlanma ölçülemedi')).toBeTruthy()
+    expect(screen.queryByText('Optimize edildi ve doğrulandı')).toBeNull()
+    expect(screen.getByText(/hız kazancı kanıtlanmadı/)).toBeTruthy()
+  })
+
+  it('ölçülmüş hızlanmada "optimize edildi" der', () => {
+    const result = optimizeResult('optimized')
+    result.data.verification = { passed: true, cases: [], benchmark: { old_seconds: 0.2, new_seconds: 0.1, speedup: 2, functions: [] } }
+    render(<ResultView result={result} onSelectLine={() => {}} />)
+    expect(screen.getByText('Optimize edildi ve doğrulandı')).toBeTruthy()
+  })
+
+  it('geçmiş kaydında da aynı kural', () => {
+    const run = historyResult('optimized')
+    run.data.speedup = null
+    render(<ResultView result={run} onSelectLine={() => {}} />)
+    expect(screen.getByText('Doğrulandı, hızlanma ölçülemedi')).toBeTruthy()
+  })
+})
+
