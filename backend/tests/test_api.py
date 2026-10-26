@@ -680,3 +680,41 @@ def test_slower_code_twice_is_failed_not_optimized(client, monkeypatch):
     assert body["error"].startswith("Önerilen kod doğru ama ölçümde eski koddan yavaş")
     assert body["energy"] is None
 
+
+# --------------------------------------------------------------------------- #
+# Sıra ipucu: orijinal ve önerilen kodun sırası veriden tarif edilir
+# --------------------------------------------------------------------------- #
+
+from app.main import _order_rule  # noqa: E402
+
+SECOND_SEEN = (
+    "def find_duplicates(items):\n    seen = set()\n    dups = []\n    added = set()\n"
+    "    for x in items:\n        if x in seen:\n            if x not in added:\n"
+    "                added.add(x)\n                dups.append(x)\n        else:\n"
+    "            seen.add(x)\n    return dups\n"
+)
+
+
+@pytest.mark.parametrize("examples, expected", [
+    ([([1, 2, 2, 1], [1, 2]), ([3, 1, 3, 2, 1], [3, 1])], "ilk görülme"),
+    # [1, 2, 2, 1] → [2, 1] ilk görülmeyi, [1, 2, 1, 2, 1] → [1, 2] son görülmeyi dışlar.
+    ([([1, 2, 2, 1], [2, 1]), ([1, 2, 1, 2, 1], [1, 2])], "ikinci görülme"),
+    ([([1, 2, 2, 1], [1, 2])], "ilk görülme"),
+    ([([5, 5, 4], [5, 4])], None),            # hem ilk hem son görülmeye uyuyor: belirsiz
+    ([([1, 2, 1], [2, 1])], "son görülme"),
+    ([([1, 2, 3], [1, 2, 3])], None),        # bütün kurallar aynı sırayı veriyor: belirsiz
+    ([([1, 2], [9, 1])], None),               # girdide olmayan eleman
+])
+def test_order_rule(examples, expected):
+    assert _order_rule(examples) == expected
+
+
+def test_order_feedback_describes_first_vs_second_occurrence(client, monkeypatch):
+    fake = use_llm(monkeypatch, llm_result(SECOND_SEEN), llm_result(GREEN_DUPLICATES))
+    body = client.post("/api/optimize", json={"code": FIND_DUPLICATES}).json()
+    feedback = fake.calls[1]["feedback"]
+    assert "Orijinal kod elemanları girdideki İLK GÖRÜLME SIRASINA göre döndürüyor" in feedback
+    assert "senin kodun ise ikinci görülme sırasına göre döndürüyor" in feedback
+    assert "ARTAN SIRADA" not in feedback  # küçük [1, 2] örneği tesadüfen sıralı; yanıltıcı cümle yok
+    assert body["status"] == "optimized"
+

@@ -191,10 +191,86 @@ def _is_sorted_repr(value: str | None) -> bool:
         return False
 
 
+def _literal(value: str | None):
+    try:
+        return ast.literal_eval(value or "")
+    except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+        return None
+
+
+ORDER_RULES = {  # ad -> bir elemanın girdi listesinde kaçıncı görülüşünün konumu
+    "ilk görülme": lambda positions: positions[0],
+    "ikinci görülme": lambda positions: positions[1] if len(positions) > 1 else None,
+    "son görülme": lambda positions: positions[-1],
+}
+
+
+def _tr_upper(text: str) -> str:
+    """Türkçe büyük harf (i → İ, ı → I)."""
+    return text.replace("i", "İ").replace("ı", "I").upper()
+
+
+def _order_rule(examples: list[tuple[list, list]]) -> str | None:
+    """Sonuç listesi, elemanları girdideki hangi görülüşlerine göre sıralıyor? Bütün örneklerde
+    tutarlı tek bir kural varsa adını döndürür. examples: (girdi listesi, sonuç listesi)."""
+    found = None
+    for name, pick in ORDER_RULES.items():
+        informative = False
+        for source, result in examples:
+            try:
+                positions = {}
+                for i, x in enumerate(source):
+                    positions.setdefault(repr(x), []).append(i)
+                keys = [pick(positions[repr(x)]) if repr(x) in positions else None for x in result]
+            except TypeError:
+                keys = [None]
+            if None in keys or len(set(keys)) != len(keys):
+                break
+            if keys != sorted(keys):
+                break
+            # Kurallar bu örnekte farklı sıra veriyorsa örnek ayırt edicidir.
+            informative = informative or len(result) > 1
+        else:
+            if informative:
+                if found is not None:
+                    return None  # birden çok kural uyuyor: belirsiz
+                found = name
+    return found
+
+
+def _order_examples(cases: list[dict], key: str) -> list[tuple[list, list]]:
+    """Başarısız durumlardan (ve en küçük karşı örneklerden) (girdi listesi, sonuç) çiftleri."""
+    examples = []
+    for case in cases:
+        for source in (case, case.get("minimal") or {}):
+            args, result = _literal(source.get("input")), _literal(source.get(key))
+            if not (isinstance(args, (list, tuple)) and isinstance(result, (list, tuple)) and len(result) > 1):
+                continue
+            lists = [a for a in args if isinstance(a, (list, tuple))]
+            if len(lists) == 1:  # tek liste argümanlı fonksiyonlarda sıra kuralı anlamlı
+                examples.append((list(lists[0]), list(result)))
+    return examples
+
+
 def _order_hint(failing: list[dict], green_code: str | None) -> str:
-    """Yalnızca sırası farklı sonuçlar için, önerilen koda göre ipucu (sabit "set" ipucu, kodda set
-    yokken modeli yanlış yöne itiyordu)."""
+    """Yalnızca sırası farklı sonuçlar için ipucu: orijinal ve önerilen kodun sırası veriden tarif edilir,
+    önerilen kodda set/heapq varsa onlara özel uyarı eklenir."""
     hint = ["ÖNEMLİ: Sonuçların elemanları doğru ama SIRASI farklı."]
+    original = _order_rule(_order_examples(failing, "old"))
+    proposed = _order_rule(_order_examples(failing, "new"))
+    if original:
+        example = next((c["minimal"] for c in failing if c.get("minimal")), None) or failing[0]
+        line = (f"Orijinal kod elemanları girdideki {_tr_upper(original)} SIRASINA göre döndürüyor "
+                f"(ör. girdi {example['input']} → {example['old']})")
+        if proposed and proposed != original:
+            line += f"; senin kodun ise {proposed} sırasına göre döndürüyor ({example['new']})"
+        hint.append(line + ".")
+        if original == "ilk görülme":
+            hint.append(
+                "Sonucu, girdiyi baştan dolaşarak ve her elemanı ilk görüldüğü yerde ekleyerek üret; bir elemanın "
+                "eklenip eklenmeyeceğine önceden hesaplanmış bilgiyle karar ver (ör. önce collections.Counter ile say, "
+                "sonra ikinci bir döngüde ilk görülüşte ekle)."
+            )
     used = _uses(green_code)
     if "heapq" in used:
         hint.append(
@@ -207,7 +283,10 @@ def _order_hint(failing: list[dict], green_code: str | None) -> str:
             "set'in dolaşma sırası tanımsızdır; sonucu set'ten üretme. Orijinalin sırasını (ör. ilk görülme "
             "sırası) korumak için dict, collections.Counter veya ekleme sırasıyla doldurulan bir liste kullan."
         )
-    if any(_is_sorted_repr(c.get("old")) for c in failing):
+    # Yalnızca bütün durumlarda sıralıysa söylenir: küçük bir örneğin tesadüfen sıralı olması
+    # ([1, 2]) modeli yanlışlıkla sıralamaya itiyordu.
+    olds = [c.get("old") for c in failing if isinstance(_literal(c.get("old")), (list, tuple)) and len(_literal(c.get("old"))) > 1]
+    if olds and all(_is_sorted_repr(o) for o in olds) and not original:
         hint.append("Orijinal kodun sonucu ARTAN SIRADA; seninki de aynı sırada olmalı.")
     if len(hint) == 1:
         hint.append("Orijinal kodun çıktı sırasını (ör. ekleme veya ilk görülme sırası) birebir koru.")

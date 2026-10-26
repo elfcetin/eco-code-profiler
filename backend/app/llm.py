@@ -370,12 +370,15 @@ def _load_json(text: str) -> dict:
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else ""
         text = text.rsplit("```", 1)[0]
+    # strict=False: metin değerlerinin içindeki kaçışsız satır sonu/sekme kabul edilir. Bazı modeller
+    # (ör. Gemini, düşük düşünme seviyesinde) green_code içine "\\n" yerine gerçek satır sonu yazıyor;
+    # katı ayrıştırma ilk denemeyi her seferinde boşa harcatıyordu.
     try:
-        data = json.loads(text)
+        data = json.loads(text, strict=False)
     except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
         try:
-            data = json.loads(text[start:end + 1]) if 0 <= start < end else None
+            data = json.loads(text[start:end + 1], strict=False) if 0 <= start < end else None
         except json.JSONDecodeError:
             data = None
         if data is None:

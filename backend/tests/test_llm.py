@@ -398,3 +398,20 @@ def test_prompt_forbids_changing_regex_and_constants():
     prompt = llm.build_prompt(ORIGINAL, FINDINGS, PATTERNS)
     assert "Regex desenlerini, sabitleri" in prompt and "regex'in kendisini değiştirme" in prompt
 
+
+def test_json_with_unescaped_newlines_in_strings_is_accepted():
+    # Gemini (düşük düşünme seviyesi) green_code içine bazen "\\n" yerine gerçek satır sonu yazıyor.
+    raw = '{"green_code": "def total(values):\n    return sum(values)\n", "changes": [], ' \
+          '"test_inputs": {"total": [[[1, 2]], [[]], [[3]], [[4, 5]]]}, "benchmark_input": {}, "notes": ""}'
+    assert "\n" in raw  # gerçek (kaçışsız) satır sonu
+    data = llm._load_json(raw)
+    assert data["green_code"] == "def total(values):\n    return sum(values)\n"
+
+
+def test_optimize_accepts_unescaped_newline_response(monkeypatch):
+    payload = llm_payload()
+    content = json.dumps(payload).replace("\\n", "\n", 3)  # ilk üç kaçışı gerçek satır sonuna çevir
+    assert "\n" in content
+    result = llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=ollama_client(content))
+    assert result["green_code"] == GREEN
+
