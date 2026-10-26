@@ -291,6 +291,7 @@ Değişkenler `backend/app/config.py` tarafından okunur. Örnek dosya: `backend
 | `OLLAMA_MODEL`   | `qwen2.5-coder:7b`                  | Ollama'da yüklü model adı |
 | `GEMINI_API_KEY` | —                                   | Yalnızca `LLM_PROVIDER=gemini` iken gerekir |
 | `GEMINI_MODEL`   | `gemini-2.5-flash`                  | Gemini model adı |
+| `GEMINI_THINKING_LEVEL` | — (boş)                     | Gemini "düşünme" seviyesi (ör. `low`). Tanımlıysa istekte `generationConfig.thinkingConfig.thinkingLevel` olarak gönderilir; boşsa hiç gönderilmez ve modelin varsayılanı kullanılır. Model uzun düşünüp `LLM_TIMEOUT`'a takılıyorsa düşük bir seviye yanıtı hızlandırır. Geçerli değerler modele göre değişir |
 | `LLM_TIMEOUT`    | `300`                               | Tek bir LLM isteği için zaman aşımı (saniye) |
 | `CPU_POWER_WATTS` | `65`                               | Enerji **tahmini** varsayımı: işlemcinin çalışırken çektiği güç (W). Arayüzde sonuç başına değiştirilebilir |
 | `RUNS_PER_DAY`   | `10000`                             | Enerji **tahmini** varsayımı: optimize edilen fonksiyonun günde kaç kez çalıştığı |
@@ -320,6 +321,8 @@ Varsayılan model, kod için eğitilmiş `qwen2.5-coder:7b`'dir. Genel amaçlı 
 `find_duplicates` sonuçları, en küçük karşı örnek geri bildirimi eklendikten sonraki ölçümlerdir; o olmadan qwen ilk denemede sıra hatası yapıyordu. Deneme sayıları küçüktür; bu tablo bir eğilim gösterir, garanti değildir. Model ilk denemede çoğu zaman hata yapar, ikinci deneme bu yüzden önemlidir. CPU'da tek bir istek 20–60 saniye sürer.
 
 > **Gemini hakkında:** `LLM_PROVIDER=gemini` seçildiğinde **kaynak kod Google'ın sunucularına gönderilir**. Kapalı ağda veya gizli kodlarda yalnızca `ollama` kullanın.
+>
+> Gemini geçici yoğunluk (**HTTP 503**, "high demand") veya istek sınırı (**HTTP 429**) döndürürse istek **2, 4 ve 8 saniye** bekleyerek en fazla **3 kez** otomatik tekrarlanır (toplam en fazla 4 istek, ~14 sn ek bekleme). Diğer hatalar (400, 401/403, 500) ve zaman aşımı tekrarlanmaz. Her istek ayrı ayrı `LLM_TIMEOUT` süresine tabidir.
 
 ---
 

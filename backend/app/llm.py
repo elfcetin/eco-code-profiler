@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import json
+import time
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -258,37 +259,58 @@ def _call_ollama(system: str, user: str, client: httpx.Client) -> str:
         raise LLMResponseError("Ollama yanıtı beklenen biçimde değil (message.content yok).") from exc
 
 
+# Gemini geçici yoğunluk (503) veya istek sınırı (429) döndürürse bu sürelerle (sn) tekrar dener:
+# toplam en fazla 1 + 3 istek.
+GEMINI_RETRY_STATUSES = (429, 503)
+GEMINI_RETRY_DELAYS = (2, 4, 8)
+_sleep = time.sleep  # testlerde gerçek bekleme yapılmasın
+
+
 def _call_gemini(system: str, user: str, client: httpx.Client) -> str:
     if not config.GEMINI_API_KEY:
         raise LLMError("LLM_PROVIDER=gemini seçili ama GEMINI_API_KEY tanımlı değil.")
 
     url = f"{GEMINI_BASE_URL}/models/{config.GEMINI_MODEL}:generateContent"
+    generation_config: dict = {"temperature": 0.2, "responseMimeType": "application/json"}
+    if config.GEMINI_THINKING_LEVEL:
+        generation_config["thinkingConfig"] = {"thinkingLevel": config.GEMINI_THINKING_LEVEL}
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
+        "generationConfig": generation_config,
     }
-    try:
-        resp = client.post(
-            url,
-            json=body,
-            headers={"x-goog-api-key": config.GEMINI_API_KEY},
-            timeout=config.LLM_TIMEOUT,
-        )
-    except httpx.TimeoutException as exc:
-        raise LLMUnavailableError(
-            f"Gemini API {config.LLM_TIMEOUT:.0f} saniye içinde yanıt vermedi."
-        ) from exc
-    except httpx.RequestError as exc:
-        raise LLMUnavailableError(
-            "Gemini API'ye ulaşılamadı. İnternet bağlantısını kontrol edin; kapalı ağda "
-            "LLM_PROVIDER=ollama kullanın."
-        ) from exc
+    for delay in (*GEMINI_RETRY_DELAYS, None):
+        try:
+            resp = client.post(
+                url,
+                json=body,
+                headers={"x-goog-api-key": config.GEMINI_API_KEY},
+                timeout=config.LLM_TIMEOUT,
+            )
+        except httpx.TimeoutException as exc:
+            raise LLMUnavailableError(
+                f"Gemini API {config.LLM_TIMEOUT:.0f} saniye içinde yanıt vermedi."
+            ) from exc
+        except httpx.RequestError as exc:
+            raise LLMUnavailableError(
+                "Gemini API'ye ulaşılamadı. İnternet bağlantısını kontrol edin; kapalı ağda "
+                "LLM_PROVIDER=ollama kullanın."
+            ) from exc
+        if resp.status_code not in GEMINI_RETRY_STATUSES or delay is None:
+            break
+        _sleep(delay)
 
+    retries = f" ({len(GEMINI_RETRY_DELAYS)} tekrar denemeden sonra)"
     if resp.status_code in (401, 403):
         raise LLMUnavailableError("Gemini API isteği reddetti: API anahtarı geçersiz veya yetkisiz.")
     if resp.status_code == 429:
-        raise LLMUnavailableError("Gemini API kota/istek sınırına ulaşıldı; biraz sonra tekrar deneyin.")
+        raise LLMUnavailableError(
+            f"Gemini API kota/istek sınırına ulaşıldı{retries}; biraz sonra tekrar deneyin."
+        )
+    if resp.status_code == 503:
+        raise LLMUnavailableError(
+            f"Gemini API şu an yoğun (HTTP 503){retries}; biraz sonra tekrar deneyin."
+        )
     if resp.is_error:
         raise LLMUnavailableError(f"Gemini API hata döndürdü (HTTP {resp.status_code}): {resp.text[:300]}")
 

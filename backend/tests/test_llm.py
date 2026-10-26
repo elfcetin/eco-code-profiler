@@ -1,4 +1,5 @@
 import json
+import re
 
 import httpx
 import pytest
@@ -155,6 +156,7 @@ def test_gemini_request_and_parsed_result(monkeypatch):
     monkeypatch.setattr(config, "LLM_PROVIDER", "gemini")
     monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
     monkeypatch.setattr(config, "GEMINI_MODEL", "gemini-test")
+    monkeypatch.setattr(config, "GEMINI_THINKING_LEVEL", None)  # boşsa thinkingConfig gönderilmez
     seen: list[httpx.Request] = []
 
     def handler(request):
@@ -174,6 +176,97 @@ def test_gemini_request_and_parsed_result(monkeypatch):
     assert "SADECE" in body["systemInstruction"]["parts"][0]["text"]
     assert result["green_code"] == GREEN
     assert result["provider"] == "gemini" and result["model"] == "gemini-test"
+
+
+GEMINI_OK = {"candidates": [{"content": {"parts": [{"text": json.dumps(llm_payload())}]}}]}
+
+
+@pytest.fixture
+def gemini(monkeypatch):
+    """Gemini sağlayıcısı + gerçek bekleme yapmayan, beklenen süreleri kaydeden _sleep."""
+    monkeypatch.setattr(config, "LLM_PROVIDER", "gemini")
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(config, "GEMINI_THINKING_LEVEL", None)
+    sleeps: list[float] = []
+    monkeypatch.setattr(llm, "_sleep", sleeps.append)
+    return sleeps
+
+
+def gemini_client(*statuses: int) -> tuple[httpx.Client, list[httpx.Request]]:
+    """Sırayla verilen HTTP kodlarını döndüren istemci (200 -> geçerli yanıt)."""
+    queue, seen = list(statuses), []
+
+    def handler(request):
+        seen.append(request)
+        status = queue.pop(0)
+        if status == 200:
+            return httpx.Response(200, json=GEMINI_OK)
+        return httpx.Response(status, json={"error": {"message": "high demand"}})
+
+    return httpx.Client(transport=httpx.MockTransport(handler)), seen
+
+
+def test_gemini_thinking_level_is_sent_when_set(gemini, monkeypatch):
+    monkeypatch.setattr(config, "GEMINI_THINKING_LEVEL", "low")
+    client, seen = gemini_client(200)
+    llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=client)
+    body = json.loads(seen[0].content)
+    assert body["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "low"}
+    assert body["generationConfig"]["temperature"] == 0.2
+
+
+def test_gemini_thinking_level_not_sent_when_empty(gemini):
+    client, seen = gemini_client(200)
+    llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=client)
+    assert "thinkingConfig" not in json.loads(seen[0].content)["generationConfig"]
+
+
+@pytest.mark.parametrize("value, expected", [("", None), ("   ", None), (" low ", "low"), ("high", "high")])
+def test_gemini_thinking_level_env(monkeypatch, value, expected):
+    import importlib
+    monkeypatch.setenv("GEMINI_THINKING_LEVEL", value)
+    try:
+        assert importlib.reload(config).GEMINI_THINKING_LEVEL == expected
+    finally:
+        monkeypatch.delenv("GEMINI_THINKING_LEVEL")
+        importlib.reload(config)
+
+
+@pytest.mark.parametrize("status", [503, 429])
+def test_gemini_retries_after_2_and_4_seconds_then_succeeds(gemini, status):
+    client, seen = gemini_client(status, status, 200)
+    result = llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=client)
+    assert result["green_code"] == GREEN
+    assert len(seen) == 3 and gemini == [2, 4]
+
+
+@pytest.mark.parametrize("status, message", [(503, "yoğun (HTTP 503)"), (429, "kota/istek sınırına")])
+def test_gemini_gives_up_after_three_retries(gemini, status, message):
+    client, seen = gemini_client(status, status, status, status)
+    with pytest.raises(llm.LLMUnavailableError, match=re.escape(message)) as exc:
+        llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=client)
+    assert "3 tekrar denemeden sonra" in str(exc.value)
+    assert len(seen) == 4 and gemini == [2, 4, 8]  # 1 + 3 deneme
+
+
+@pytest.mark.parametrize("status", [500, 400, 401, 403])
+def test_gemini_does_not_retry_other_errors(gemini, status):
+    client, seen = gemini_client(status)
+    with pytest.raises(llm.LLMUnavailableError):
+        llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=client)
+    assert len(seen) == 1 and gemini == []
+
+
+def test_gemini_timeout_is_not_retried(gemini):
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("zaman aşımı", request=request)
+
+    with pytest.raises(llm.LLMUnavailableError, match="saniye içinde yanıt vermedi"):
+        llm.optimize(ORIGINAL, FINDINGS, PATTERNS, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert len(calls) == 1 and gemini == []
 
 
 def test_gemini_without_key_raises(monkeypatch):

@@ -20,6 +20,9 @@ OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 # Gemini (isteğe bağlı)
 GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY") or None
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Gemini "düşünme" seviyesi (ör. low). Boşsa gönderilmez ve modelin varsayılanı kullanılır.
+# Uzun düşünüp LLM_TIMEOUT'a takılan modellerde düşük bir seviye yanıtı hızlandırır.
+GEMINI_THINKING_LEVEL: str | None = (os.getenv("GEMINI_THINKING_LEVEL") or "").strip() or None
 
 # Tek bir LLM isteği için zaman aşımı (saniye); CPU üzerinde yerel modeller yavaş olabilir.
 LLM_TIMEOUT: float = float(os.getenv("LLM_TIMEOUT", "300"))
